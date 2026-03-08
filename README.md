@@ -4,10 +4,11 @@ Extend LUH2 land-use harmonization grids from 2100 to 2500.
 
 ## Method
 
-- Per-cell rates of change are ramped linearly to zero over a configurable period (default: 2100–2149).
-- Negative fractions are clamped; the deficit is absorbed by secondary forest.
-- Biofuel crop fractions are scaled by an IAM-derived BECCS ratio.
-- All other management fields are held constant at their 2100 values.
+1. **AFOLU calibration** (notebook 02): A cohort-based carbon cycle model is calibrated against the IAM's AFOLU CO₂ trajectory pre-2100, then inverted to derive the rate multiplier $r(t)$ that reproduces the target post-2100 AFOLU pathway.
+2. **Gridded extension** (notebook 03): Per-cell rates of change are multiplied by the AFOLU-consistent ramp $r(t)$, with negative fractions clamped and deficit absorbed by secondary forest.
+3. Biofuel crop fractions are scaled by an IAM-derived BECCS ratio.
+4. All other management fields are held constant at their 2100 values.
+5. **Verification** (notebook 04): Extension output is read back and AFOLU fluxes are recomputed to confirm consistency.
 
 ## Setup
 
@@ -26,9 +27,10 @@ src/
   extend.py    # core extension logic (states, biofuel, constant)
 notebooks/
   01_explore.ipynb               # exploratory analysis of inputs
-  02_gridded_extension.ipynb     # produce extended NetCDF files
-  03_afolu_flux_check.ipynb      # AFOLU flux estimation & validation
-output/                          # generated NetCDF files (git-ignored)
+  02_afolu_calibration.ipynb     # calibrate AFOLU model, derive ramp r(t)
+  03_gridded_extension.ipynb     # produce extended NetCDF files using r(t)
+  04_verify_afolu.ipynb          # verify AFOLU fluxes from gridded output
+output/                          # generated files (git-ignored)
 ```
 
 ## Output files

@@ -4,19 +4,22 @@ import numpy as np
 from . import config as cfg
 
 
-def extend_states(values_2100, rates_2100, years):
+def extend_states(values_2100, rates_2100, years, ramp=None):
     """Extend land-use state fields from 2100 to *years*.
 
     Strategy:
-    - Linearly ramp each cell's rate of change to zero by YR_AFOLU_ZERO.
+    - Multiply each cell's rate of change by the ramp multiplier at each year.
     - Clamp declining variables at zero; redirect excess to secdf.
-    - Hold constant from YR_AFOLU_ZERO onward.
+    - Hold constant once ramp reaches zero.
 
     Parameters
     ----------
     values_2100 : dict[str, ndarray]  — 2-D (lat, lon) arrays at 2100.
     rates_2100  : dict[str, ndarray]  — per-cell rates at 2100.
     years       : array-like of output years (first should be 2101).
+    ramp        : array-like, optional — per-year multipliers, same length as
+                  *years*. If None, uses a linear ramp (1 at 2101 → 0 at
+                  YR_AFOLU_ZERO).
 
     Returns
     -------
@@ -26,6 +29,14 @@ def extend_states(values_2100, rates_2100, years):
     nt = len(years)
     shape2d = values_2100["primf"].shape
     n_ramp = cfg.YR_AFOLU_ZERO - cfg.YR_END_INPUT  # 49
+
+    # Build or validate ramp
+    if ramp is not None:
+        ramp = np.asarray(ramp, dtype=np.float64)
+        assert len(ramp) == nt, f"ramp length {len(ramp)} != years length {nt}"
+    else:
+        # Default: linear ramp
+        ramp = np.clip(1.0 - (years - cfg.YR_END_INPUT) / n_ramp, 0.0, 1.0)
 
     # Work and store entirely in float64 to avoid float32 rounding artefacts
     # in global sums.  Convert to float32 only when writing final NetCDF.
@@ -44,8 +55,7 @@ def extend_states(values_2100, rates_2100, years):
     land = np.isfinite(values_2100["secdf"])
 
     for ti, yr in enumerate(years):
-        dt = yr - cfg.YR_END_INPUT
-        mult = max(0.0, 1.0 - dt / n_ramp)
+        mult = ramp[ti]
 
         # Apply ramped rates to all variables except secdf
         new = {}

@@ -71,6 +71,30 @@ def afolu_ramp(years=None):
     return mult
 
 
+def load_derived_ramp(years=None):
+    """Load the AFOLU-consistent ramp derived by notebook 02.
+
+    Parameters
+    ----------
+    years : array-like, optional
+        Years to return. Must be a subset of the saved years (2101-2500).
+        Default: all saved years.
+
+    Returns
+    -------
+    np.ndarray of multipliers, same length as *years*.
+    """
+    ramp_path = cfg.OUTPUT_DIR / 'afolu_calibration.npz'
+    data = np.load(ramp_path)
+    saved_years = data['years']
+    saved_ramp = data['ramp']
+    if years is None:
+        return saved_ramp
+    years = np.asarray(years, dtype=int)
+    indices = np.searchsorted(saved_years, years)
+    return saved_ramp[indices]
+
+
 # ---------- NetCDF helpers ----------
 
 def load_states():
