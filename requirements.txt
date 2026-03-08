@@ -1,0 +1,6 @@
+numpy>=2.0
+xarray>=2024.1
+pandas>=2.2
+matplotlib>=3.9
+netCDF4>=1.6
+cftime>=1.6
