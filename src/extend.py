@@ -27,44 +27,45 @@ def extend_states(values_2100, rates_2100, years):
     shape2d = values_2100["primf"].shape
     n_ramp = cfg.YR_AFOLU_ZERO - cfg.YR_END_INPUT  # 49
 
-    # Initialise output arrays
-    out = {v: np.empty((nt,) + shape2d, dtype=np.float32) for v in cfg.STATE_VARS}
+    # Work and store entirely in float64 to avoid float32 rounding artefacts
+    # in global sums.  Convert to float32 only when writing final NetCDF.
+    out = {v: np.empty((nt,) + shape2d, dtype=np.float64) for v in cfg.STATE_VARS}
 
     # Previous timestep values — start from 2100
     prev = {v: values_2100[v].copy().astype(np.float64) for v in cfg.STATE_VARS}
 
+    # Per-cell total to preserve: sum of all state vars at 2100.
+    # On ocean cells (all NaN) this is 0, but secdf guard below keeps them NaN.
+    cell_total = np.zeros(shape2d, dtype=np.float64)
+    for v in cfg.STATE_VARS:
+        cell_total += np.where(np.isfinite(values_2100[v]), values_2100[v], 0.0)
+
+    # Land mask: cells where secdf (and hence all states) is finite
+    land = np.isfinite(values_2100["secdf"])
+
     for ti, yr in enumerate(years):
         dt = yr - cfg.YR_END_INPUT
-        # Rate multiplier: linear ramp from 1→0 over n_ramp years
         mult = max(0.0, 1.0 - dt / n_ramp)
 
-        # Apply rates (except secdf which absorbs residuals)
-        delta = {}
-        for v in cfg.STATE_VARS:
-            if v == "secdf":
-                continue
-            delta[v] = rates_2100[v] * mult
-
-        # Compute tentative new values and clamp at zero
-        excess = np.zeros(shape2d, dtype=np.float64)
+        # Apply ramped rates to all variables except secdf
         new = {}
         for v in cfg.STATE_VARS:
             if v == "secdf":
                 continue
-            tentative = prev[v] + delta[v]
-            # Where value was valid (not NaN) and goes negative, clamp
-            neg = np.isfinite(tentative) & (tentative < 0)
-            excess += np.where(neg, -tentative, 0.0)
-            new[v] = np.where(neg, 0.0, tentative)
+            tentative = prev[v] + rates_2100[v] * mult
+            new[v] = np.where(tentative < 0, 0.0, tentative)
 
-        # secdf absorbs its own rate plus any excess from clamped variables
-        secdf_tentative = prev["secdf"] + rates_2100["secdf"] * mult + excess
-        new["secdf"] = np.where(np.isfinite(secdf_tentative), secdf_tentative,
-                                prev["secdf"])
+        # secdf as residual: exact per-cell conservation by construction
+        non_secdf_sum = np.zeros(shape2d, dtype=np.float64)
+        for v in cfg.STATE_VARS:
+            if v != "secdf":
+                non_secdf_sum += np.where(np.isfinite(new[v]), new[v], 0.0)
+        secdf_new = cell_total - non_secdf_sum
+        new["secdf"] = np.where(land, secdf_new, np.nan)
 
         # Store and advance
         for v in cfg.STATE_VARS:
-            out[v][ti] = new[v].astype(np.float32)
+            out[v][ti] = new[v]
             prev[v] = new[v]
 
     return out
