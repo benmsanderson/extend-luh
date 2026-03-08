@@ -1,0 +1,71 @@
+File location: /div/no-backup-nac/users/masan/for_Ben
+
+
+H
+Model: "GCAM 8s"
+Current scenario name in Scenario Explorer: "SSP3 - High Emissions"
+HL
+Model: "WITCH 6.0"
+Current scenario name in Scenario Explorer: "SSP5 - Medium-Low Emissions_a"
+M
+Model: "IMAGE 3.4"
+Current scenario name in Scenario Explorer: "SSP2 - Medium Emissions"
+ML
+Model: "COFFEE 1.6"
+Current scenario name in Scenario Explorer: "SSP2 - Medium-Low Emissions"
+L
+Model: "MESSAGEix-GLOBIOM-GAINS 2.1-M-R12"
+Current scenario name in Scenario Explorer: "SSP2 - Low Emissions_f"
+LN
+Model: "AIM 3.0"
+Current scenario name in Scenario Explorer: "SSP2 - Low Overshoot_a"
+VL
+Model: "REMIND-MAgPIE 3.5-4.11"
+Current scenario name in Scenario Explorer: "SSP1 - Very Low Emissions"
+
+
+VL File list (IAM regional outputs to 2500):
+REMIND-MAgPIE_3.5-4.11_SSP1_-_Very_Low_Emissions_6_afolu_variables.csv
+
+VL File List (LUH gridded inputs pre-2100):
+
+ 
+
+output_annual_2024_states_step4.nc: gridded crop-types, grazing, urban land
+
+ 
+
+output_annual_summed_management_step5.nc: gridded land management variables (irrigation etc)
+
+ 
+
+woodharvest_MAGPIE_LUH3_with_pltns.nc: national wood harvest demands
+
+ 
+
+fuelwood_MAGPIE_LUH3_with_pltns_v2.nc: fraction of national wood harvest that is used for fuelwood
+
+ 
+
+irrig_MAGPIE_LUH3_croptypes.nc: national irrigated area per crop type
+irrig_MAGPIE_LUH3.nc: national irrigated area
+
+biof_MAGPIE_LUH3.nc: gridded fractions of total cropland area used for second generation biofuels
+fertl_MAGPIE_LUH3.nc: national fertilizer: annual percentage change in total fertilizer rate per country c3ann
+flood_MAGPIE_LUH3_noChange_grids.nc: gridded fractions of C3 annuals that are flooded for rice
+flood_MAGPIE_LUH3_noChange.nc: percent change in national areas flooded for rice
+
+
+added_treecover_zeros.nc: afforestation/added trees
+gcam_plantations_zeros.nc: plantations area
+iam_c3abf_zeros.nc: fraction of C3 annuals used for 2nd generation bioenergy
+iam_c3nbf_zeros.nc: fraction of C3 N-fixers used for 2nd generation bioenergy
+iam_c4abf_zeros.nc: fraction of C4 annuals used for 2nd generation bioenergy
+pltns_bfuel_zeros.nc: fraction of plantations harvest used for biofuels
+pltns_bioh_zeros.nc: gridded carbon harvested from plantations
+pltns_wdprd_zeros.nc: fraction of plantations harvest used for wood products
+protected_nonfst_zeros.nc: gridded fractions of non-forest that are protected
+protected_pltns_zeros.nc: gridded fractions of plantations that are protected
+protected_primf_zeros.nc: gridded fractions of primary forest that are protected
+protected_secdf_zeros.nc: gridded fractions of secondary forest that are protected
+protected_zeros.nc: gridded fractions of grid-cell that are protected
