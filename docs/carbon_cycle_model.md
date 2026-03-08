@@ -104,6 +104,17 @@ $$\boxed{\text{AFOLU}(t) = \beta + \gamma \cdot t + \alpha_{\text{trans}} \cdot 
 
 **Calibration**: Ordinary least squares (OLS) regression on pre-2100 IAM data, with optional profile likelihood scan over $\tau$ to verify the optimum is within the literature range.
 
+### Key Assumption: Global (Zero-Dimensional) Model
+
+The carbon cycle model is fit to **globally-aggregated** quantities: transition fluxes and area increments are summed over all grid cells before regression. The resulting ramp $r(t)$ is a single scalar applied uniformly to every grid cell at each timestep.
+
+This means:
+- The **spatial pattern** of land-use change is fixed (frozen at the 2100 pattern); only the global amplitude varies over time.
+- Carbon density, equilibrium stocks, and the relaxation timescale $\tau$ are treated as globally-representative constants rather than spatially-varying fields.
+- Regional differences in recovery dynamics (e.g. tropical forests recover faster than boreal forests) are not resolved.
+
+This is a deliberate simplification. A future refinement could fit separate parameters by biome or latitude band — for example, tropical and boreal forests likely have substantially different $\tau$ and $C^{\text{eq}}$ — and derive spatially-varying ramps. The current global approach is adequate for producing a self-consistent extension but may under- or over-estimate fluxes in specific regions.
+
 ---
 
 ## Forward Solve: Deriving the AFOLU-Consistent Ramp

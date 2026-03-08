@@ -4,7 +4,7 @@ Extend LUH2 land-use harmonization grids from 2100 to 2500.
 
 ## Method
 
-1. **AFOLU calibration** (notebook 02): A cohort-based carbon cycle model is calibrated against the IAM's AFOLU CO₂ trajectory pre-2100, then inverted to derive the rate multiplier $r(t)$ that reproduces the target post-2100 AFOLU pathway.
+1. **AFOLU calibration** (notebook 02): A cohort-based carbon cycle model is calibrated against the IAM's **globally-aggregated** AFOLU CO₂ trajectory pre-2100, then inverted to derive the rate multiplier $r(t)$ that reproduces the target post-2100 AFOLU pathway. The model is zero-dimensional: all fluxes and area increments are summed globally before fitting, yielding a single scalar $r(t)$ applied uniformly to every grid cell. Carbon density, equilibrium stocks, and the relaxation timescale $\tau$ are treated as globally-representative constants. This simplification could be revisited with spatially-varying parameters (e.g. different $\tau$ for tropical vs boreal forests). See [docs/carbon_cycle_model.md](docs/carbon_cycle_model.md) for details.
 2. **Gridded extension** (notebook 03): Per-cell rates of change are multiplied by the AFOLU-consistent ramp $r(t)$, with negative fractions clamped and deficit absorbed by secondary forest.
 3. Biofuel crop fractions are scaled by an IAM-derived BECCS ratio.
 4. All other management fields are held constant at their 2100 values.
