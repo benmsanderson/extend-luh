@@ -10,7 +10,7 @@ The workflow has four stages, each implemented as a notebook:
 
 | Stage | Notebook | Purpose |
 |-------|----------|---------|
-| **1. Explore** | `01_explore` | Visualise IAM trajectories, inspect LUH states and rates at 2100, prototype the extension logic |
+| **1. Explore** | `01_explore` | Visualise IAM trajectories, inspect LUH states and rates at 2100.
 | **2. Calibrate** | `02_afolu_calibration` | Fit a carbon cycle model to pre-2100 data and invert it to derive an AFOLU-consistent rate ramp $r(t)$ |
 | **3. Extend** | `03_gridded_extension` | Apply $r(t)$ to gridded states; scale biofuel by BECCS; hold management constant; write NetCDF output |
 | **4. Verify** | `04_verify_afolu` | Re-derive AFOLU fluxes from the gridded output and confirm they match the IAM target |
