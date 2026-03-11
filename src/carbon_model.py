@@ -20,6 +20,7 @@ from . import config as cfg
 # ============================================================================
 
 # Carbon densities: tC per km² (for transition flux)
+# Includes entries for all variable names across scenarios.
 CARBON_DENSITY = {
     'primf': 15_000, 'secdf':  8_000,
     'primn':  1_500, 'secdn':  1_000,
@@ -27,6 +28,8 @@ CARBON_DENSITY = {
     'c4ann':    500, 'c4per':    500,
     'pastr':    800, 'range':    600,
     'urban':    200, 'pltns':  6_000,
+    # Aggregated types (used by scenarios without primary/secondary split)
+    'forest': 10_000,  # area-weighted blend of primf+secdf+pltns
 }
 
 # Equilibrium carbon stock for regrowing land types (tC per km²)
@@ -41,10 +44,20 @@ C_EQ = {
     'pastr':      0, 'range':  0,
     'urban':      0,
     'pltns':  8_000,  # managed plantation regrowth
+    # Aggregated
+    'forest': 10_000,  # net regrowth in aggregate forest pool
 }
 
-# Regrowing land types (those with C_EQ > 0)
-REGROW_VARS = [v for v in cfg.STATE_VARS if C_EQ[v] > 0]
+
+def regrow_vars_for(state_vars=None):
+    """Return the list of regrowing variables (C_EQ > 0) for a state var list."""
+    if state_vars is None:
+        state_vars = cfg.STATE_VARS
+    return [v for v in state_vars if C_EQ.get(v, 0) > 0]
+
+
+# Default REGROW_VARS for backward compatibility
+REGROW_VARS = regrow_vars_for(cfg.STATE_VARS)
 
 # Conversion factor: tonne carbon to Megatonne CO₂
 TC_TO_MTCO2 = 3.667 / 1e6
@@ -54,7 +67,7 @@ TC_TO_MTCO2 = 3.667 / 1e6
 # Core model functions
 # ============================================================================
 
-def stock_flux_for_tau(tau, area_incr, c_eq=None):
+def stock_flux_for_tau(tau, area_incr, c_eq=None, regrow_vars=None):
     """
     Compute stock-change flux for a given relaxation timescale.
 
@@ -72,6 +85,8 @@ def stock_flux_for_tau(tau, area_incr, c_eq=None):
     c_eq : dict, optional
         Equilibrium carbon stock (tC/km²) for each land type.
         Defaults to module-level C_EQ.
+    regrow_vars : list[str], optional
+        Which variables to include. Default: keys of area_incr.
 
     Returns
     -------
@@ -80,13 +95,15 @@ def stock_flux_for_tau(tau, area_incr, c_eq=None):
     """
     if c_eq is None:
         c_eq = C_EQ
+    if regrow_vars is None:
+        regrow_vars = list(area_incr.keys())
 
     n = len(next(iter(area_incr.values())))
     decay = np.exp(-1.0 / tau)
     flux = np.zeros(n)
 
-    for v in area_incr:
-        ceq = c_eq[v]
+    for v in regrow_vars:
+        ceq = c_eq.get(v, 0)
         if ceq == 0:
             continue
         G = 0.0
@@ -100,7 +117,7 @@ def stock_flux_for_tau(tau, area_incr, c_eq=None):
 
 
 def calibrate_afolu_model(transition_flux, area_incr, afolu_target, years,
-                          tau_grid=None, tau_fixed=None):
+                          tau_grid=None, tau_fixed=None, regrow_vars=None):
     """
     Calibrate 4-predictor AFOLU model via profile likelihood over τ.
 
@@ -152,7 +169,7 @@ def calibrate_afolu_model(transition_flux, area_incr, afolu_target, years,
         coefs_profile = np.zeros((len(tau_grid), 4))
 
         for i, tau_try in enumerate(tau_grid):
-            sf = stock_flux_for_tau(tau_try, area_incr)
+            sf = stock_flux_for_tau(tau_try, area_incr, regrow_vars=regrow_vars)
             X = np.column_stack([np.ones(n), time_trend, transition_flux, sf])
             c, _, _, _ = np.linalg.lstsq(X, afolu_target, rcond=None)
             pred = X @ c
@@ -167,7 +184,7 @@ def calibrate_afolu_model(transition_flux, area_incr, afolu_target, years,
         tau_profile = tau_grid
 
     # Final fit at chosen τ
-    stock_flux = stock_flux_for_tau(tau_use, area_incr)
+    stock_flux = stock_flux_for_tau(tau_use, area_incr, regrow_vars=regrow_vars)
     X = np.column_stack([np.ones(n), time_trend, transition_flux, stock_flux])
     coefs, _, _, _ = np.linalg.lstsq(X, afolu_target, rcond=None)
     beta, gamma, alpha_trans, alpha_stock = coefs
@@ -199,7 +216,9 @@ def calibrate_afolu_model(transition_flux, area_incr, afolu_target, years,
 
 def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
                        area_incr_pre, F_trans_unit, dA_unit,
-                       afolu_target_ext, years_pre, years_ext):
+                       afolu_target_ext, years_pre, years_ext,
+                       regrow_vars=None, calibration_residual_2100=0.0,
+                       blend_timescale=10.0):
     """
     Forward solve for AFOLU-consistent ramp r(t) from 2101 onward.
 
@@ -224,6 +243,12 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
         Pre-2100 years (for computing time trend at 2100).
     years_ext : ndarray
         Extension years (2101–2500).
+    calibration_residual_2100 : float, optional
+        Residual (calibrated - IAM) at year 2100. Used to blend smoothly
+        from the calibrated model value to the IAM target. Default 0.
+    blend_timescale : float, optional
+        E-folding timescale (years) for blending the calibration residual
+        into the post-2100 target. Default 10.
 
     Returns
     -------
@@ -234,13 +259,16 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
         - 'baseline': frozen baseline (β + γ·t₂₁₀₀)
         - 'G_end_pre': cohort state G_v at end of pre-2100 period
     """
+    if regrow_vars is None:
+        regrow_vars = REGROW_VARS
+
     n_pre = len(years_pre)
     n_ext = len(years_ext)
     decay = np.exp(-1.0 / tau)
 
     # Compute G_v at end of pre-2100 period
     G_end_pre = {}
-    for v in REGROW_VARS:
+    for v in regrow_vars:
         G = 0.0
         for t in range(n_pre):
             G = G * decay + area_incr_pre[v][t]
@@ -249,7 +277,7 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
     # Stock-change flux from one unit of new area
     S_new_unit = sum(
         -(C_EQ[v] / tau) * dA_unit[v] * TC_TO_MTCO2
-        for v in REGROW_VARS if C_EQ[v] > 0
+        for v in regrow_vars if C_EQ.get(v, 0) > 0
     )
 
     # Baseline frozen at 2100 time trend value
@@ -259,18 +287,26 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
     # Denominator for forward solve
     denom = baseline + alpha_trans * F_trans_unit + alpha_stock * S_new_unit
 
+    # Blended target: smooth transition from calibrated model to IAM target
+    # target_blended(t) = IAM(t) + residual_2100 × exp(-(t-2100)/T_blend)
+    yr0 = int(years_ext[0])
+    blend_correction = np.array([
+        calibration_residual_2100 * np.exp(-(yr0 + t - cfg.YR_END_INPUT) / blend_timescale)
+        for t in range(n_ext)
+    ])
+
     # Forward solve
     r_derived = np.zeros(n_ext)
     afolu_reconstructed = np.zeros(n_ext)
-    G_work = {v: G_end_pre[v] for v in REGROW_VARS}
+    G_work = {v: G_end_pre[v] for v in regrow_vars}
 
     for t in range(n_ext):
-        target_t = afolu_target_ext[t]
+        target_t = afolu_target_ext[t] + blend_correction[t]
 
         # Stock-change flux from previous cohorts (before this year's increment)
         S_prev = sum(
             -(C_EQ[v] / tau) * G_work[v] * decay * TC_TO_MTCO2
-            for v in REGROW_VARS if C_EQ[v] > 0
+            for v in regrow_vars if C_EQ.get(v, 0) > 0
         )
 
         # Solve for r(t)
@@ -279,13 +315,13 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
         r_derived[t] = r_t
 
         # Update G_v
-        for v in REGROW_VARS:
+        for v in regrow_vars:
             G_work[v] = G_work[v] * decay + r_t * dA_unit[v]
 
         # Reconstruct AFOLU flux
         S_full = sum(
             -(C_EQ[v] / tau) * G_work[v] * TC_TO_MTCO2
-            for v in REGROW_VARS if C_EQ[v] > 0
+            for v in regrow_vars if C_EQ.get(v, 0) > 0
         )
         afolu_reconstructed[t] = (baseline * r_t +
                                   alpha_trans * F_trans_unit * r_t +
@@ -299,4 +335,5 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
         'residual': residual,
         'baseline': baseline,
         'G_end_pre': G_end_pre,
+        'blend_correction': blend_correction,
     }

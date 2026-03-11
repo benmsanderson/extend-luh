@@ -4,12 +4,13 @@ import numpy as np
 from . import config as cfg
 
 
-def extend_states(values_2100, rates_2100, years, ramp=None):
+def extend_states(values_2100, rates_2100, years, ramp=None,
+                  state_vars=None, residual_var=None):
     """Extend land-use state fields from 2100 to *years*.
 
     Strategy:
     - Multiply each cell's rate of change by the ramp multiplier at each year.
-    - Clamp declining variables at zero; redirect excess to secdf.
+    - Clamp declining variables at zero; redirect excess to residual_var.
     - Hold constant once ramp reaches zero.
 
     Parameters
@@ -20,14 +21,24 @@ def extend_states(values_2100, rates_2100, years, ramp=None):
     ramp        : array-like, optional — per-year multipliers, same length as
                   *years*. If None, uses a linear ramp (1 at 2101 → 0 at
                   YR_AFOLU_ZERO).
+    state_vars  : list[str], optional — variables to extend.
+                  Default: cfg.STATE_VARS.
+    residual_var : str, optional — variable used as residual for per-cell
+                   conservation. Default: "secdf".
 
     Returns
     -------
     dict[str, ndarray] — 3-D arrays (time, lat, lon) for each state var.
     """
+    if state_vars is None:
+        state_vars = cfg.STATE_VARS
+    if residual_var is None:
+        residual_var = "secdf"
+
     years = np.asarray(years)
     nt = len(years)
-    shape2d = values_2100["primf"].shape
+    first_var = state_vars[0]
+    shape2d = values_2100[first_var].shape
     n_ramp = cfg.YR_AFOLU_ZERO - cfg.YR_END_INPUT  # 49
 
     # Build or validate ramp
@@ -40,41 +51,54 @@ def extend_states(values_2100, rates_2100, years, ramp=None):
 
     # Work and store entirely in float64 to avoid float32 rounding artefacts
     # in global sums.  Convert to float32 only when writing final NetCDF.
-    out = {v: np.empty((nt,) + shape2d, dtype=np.float64) for v in cfg.STATE_VARS}
+    out = {v: np.empty((nt,) + shape2d, dtype=np.float64) for v in state_vars}
 
     # Previous timestep values — start from 2100
-    prev = {v: values_2100[v].copy().astype(np.float64) for v in cfg.STATE_VARS}
+    prev = {v: values_2100[v].copy().astype(np.float64) for v in state_vars}
 
     # Per-cell total to preserve: sum of all state vars at 2100.
-    # On ocean cells (all NaN) this is 0, but secdf guard below keeps them NaN.
+    # On ocean cells (all NaN) this is 0, but residual guard below keeps them NaN.
     cell_total = np.zeros(shape2d, dtype=np.float64)
-    for v in cfg.STATE_VARS:
+    for v in state_vars:
         cell_total += np.where(np.isfinite(values_2100[v]), values_2100[v], 0.0)
 
-    # Land mask: cells where secdf (and hence all states) is finite
-    land = np.isfinite(values_2100["secdf"])
+    # Land mask: cells where residual_var (and hence all states) is finite
+    land = np.isfinite(values_2100[residual_var])
+
+    # Normalise rates so they sum to zero per cell.  Input datasets may have
+    # small per-cell imbalances (especially with aggregated variables like
+    # "forest"); without this correction, the residual variable would absorb
+    # the full imbalance, causing a rate discontinuity at the 2100 boundary.
+    rates = {v: rates_2100[v].astype(np.float64) for v in state_vars}
+    rate_sum = np.zeros(shape2d, dtype=np.float64)
+    for v in state_vars:
+        rate_sum += np.where(np.isfinite(rates[v]), rates[v], 0.0)
+    # Spread the imbalance onto the residual variable (largest pool)
+    rates[residual_var] = np.where(land,
+                                   rates[residual_var] - rate_sum,
+                                   rates[residual_var])
 
     for ti, yr in enumerate(years):
         mult = ramp[ti]
 
-        # Apply ramped rates to all variables except secdf
+        # Apply ramped rates to all variables except the residual
         new = {}
-        for v in cfg.STATE_VARS:
-            if v == "secdf":
+        for v in state_vars:
+            if v == residual_var:
                 continue
-            tentative = prev[v] + rates_2100[v] * mult
+            tentative = prev[v] + rates[v] * mult
             new[v] = np.where(tentative < 0, 0.0, tentative)
 
-        # secdf as residual: exact per-cell conservation by construction
-        non_secdf_sum = np.zeros(shape2d, dtype=np.float64)
-        for v in cfg.STATE_VARS:
-            if v != "secdf":
-                non_secdf_sum += np.where(np.isfinite(new[v]), new[v], 0.0)
-        secdf_new = cell_total - non_secdf_sum
-        new["secdf"] = np.where(land, secdf_new, np.nan)
+        # Residual absorbs only the small clamping deficit, not rate imbalance
+        non_residual_sum = np.zeros(shape2d, dtype=np.float64)
+        for v in state_vars:
+            if v != residual_var:
+                non_residual_sum += np.where(np.isfinite(new[v]), new[v], 0.0)
+        residual_new = cell_total - non_residual_sum
+        new[residual_var] = np.where(land, residual_new, np.nan)
 
         # Store and advance
-        for v in cfg.STATE_VARS:
+        for v in state_vars:
             out[v][ti] = new[v]
             prev[v] = new[v]
 

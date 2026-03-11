@@ -4,6 +4,16 @@ import pandas as pd
 import xarray as xr
 import numpy as np
 from . import config as cfg
+from .config import ScenarioConfig
+
+
+def _resolve_scenario(scenario):
+    """Return a ScenarioConfig from a key string, ScenarioConfig, or None."""
+    if scenario is None:
+        return cfg.SCENARIOS[cfg.DEFAULT_SCENARIO_KEY]
+    if isinstance(scenario, str):
+        return cfg.get_scenario(scenario)
+    return scenario
 
 
 # ---------- CSV helpers ----------
@@ -13,8 +23,22 @@ def load_csv():
     return pd.read_csv(cfg.CSV_FILE)
 
 
-def filter_scenario(df, model=cfg.MODEL, scenario=cfg.SCENARIO):
-    """Return rows for a single model+scenario."""
+def filter_scenario(df, model=None, scenario=None, scen=None):
+    """Return rows for a single model+scenario.
+
+    Parameters
+    ----------
+    df : DataFrame
+    model, scenario : str, optional
+        Explicit model/scenario names. If omitted, taken from *scen*.
+    scen : str or ScenarioConfig, optional
+        Scenario key or config. Default: VL.
+    """
+    sc = _resolve_scenario(scen)
+    if model is None:
+        model = sc.model
+    if scenario is None:
+        scenario = sc.scenario
     return df[(df["model"] == model) & (df["scenario"] == scenario)]
 
 
@@ -71,7 +95,7 @@ def afolu_ramp(years=None):
     return mult
 
 
-def load_derived_ramp(years=None):
+def load_derived_ramp(years=None, scen=None):
     """Load the AFOLU-consistent ramp derived by notebook 02.
 
     Parameters
@@ -79,12 +103,15 @@ def load_derived_ramp(years=None):
     years : array-like, optional
         Years to return. Must be a subset of the saved years (2101-2500).
         Default: all saved years.
+    scen : str or ScenarioConfig, optional
+        Scenario key or config. Default: VL.
 
     Returns
     -------
     np.ndarray of multipliers, same length as *years*.
     """
-    ramp_path = cfg.OUTPUT_DIR / 'afolu_calibration.npz'
+    sc = _resolve_scenario(scen)
+    ramp_path = sc.output_dir / 'afolu_calibration.npz'
     data = np.load(ramp_path)
     saved_years = data['years']
     saved_ramp = data['ramp']
@@ -97,27 +124,41 @@ def load_derived_ramp(years=None):
 
 # ---------- NetCDF helpers ----------
 
-def load_states():
+def load_states(scen=None):
     """Open the states dataset (lazy)."""
-    return xr.open_dataset(cfg.STATES_FILE)
+    sc = _resolve_scenario(scen)
+    return xr.open_dataset(sc.states_path)
 
 
-def load_management():
-    """Open the management dataset (lazy)."""
-    return xr.open_dataset(cfg.MGMT_FILE)
+def load_management(scen=None):
+    """Open the management dataset (lazy).
+
+    For scenarios where management is embedded in the states file,
+    this returns the states dataset.
+    """
+    sc = _resolve_scenario(scen)
+    if sc.mgmt_in_states:
+        return xr.open_dataset(sc.states_path)
+    if sc.mgmt_path is None:
+        raise FileNotFoundError(
+            f"Scenario '{sc.key}' has no management file.")
+    return xr.open_dataset(sc.mgmt_path)
 
 
-def load_biof():
+def load_biof(scen=None):
     """Open the biofuel dataset."""
-    return xr.open_dataset(cfg.BIOF_FILE)
+    sc = _resolve_scenario(scen)
+    return xr.open_dataset(sc.biof_path)
 
 
-def state_2100(ds):
+def state_2100(ds, scen=None):
     """Return all state variables at 2100 as a dict of 2-D arrays."""
-    return {v: ds[v].isel(time=-1).values for v in cfg.STATE_VARS}
+    sc = _resolve_scenario(scen)
+    return {v: ds[v].isel(time=-1).values for v in sc.state_vars}
 
 
-def rates_2100(ds):
+def rates_2100(ds, scen=None):
     """Per-cell rate of change at 2100 (2099→2100 difference)."""
+    sc = _resolve_scenario(scen)
     return {v: ds[v].isel(time=-1).values - ds[v].isel(time=-2).values
-            for v in cfg.STATE_VARS}
+            for v in sc.state_vars}
