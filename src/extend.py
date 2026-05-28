@@ -94,6 +94,21 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
         for v in state_vars:
             if v != residual_var:
                 non_residual_sum += np.where(np.isfinite(new[v]), new[v], 0.0)
+
+        # If non-residual vars overshot the available cell area (which can happen
+        # when crops have positive rates right up to 2100 and the residual pool is
+        # nearly exhausted), scale all non-residual values down proportionally so
+        # the residual never goes negative.  Without this, the residual absorbs
+        # the excess as a negative value, producing individual crop fractions > 1.
+        overshoot = land & (non_residual_sum > cell_total) & (non_residual_sum > 0)
+        if overshoot.any():
+            safe_sum = np.where(non_residual_sum > 0, non_residual_sum, 1.0)
+            scale = np.where(overshoot, cell_total / safe_sum, 1.0)
+            for v in state_vars:
+                if v != residual_var:
+                    new[v] = new[v] * scale
+            non_residual_sum = np.where(overshoot, cell_total, non_residual_sum)
+
         residual_new = cell_total - non_residual_sum
         new[residual_var] = np.where(land, residual_new, np.nan)
 

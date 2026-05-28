@@ -417,19 +417,95 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     }
     fname_mgmt_static = f"{MGMT_STEM}_extension_static.nc"
 
+    # File 5 — wood harvest demand ramp (country-level)
+    ds_wh_out = None
+    fname_wh = None
+    ds_fw_out = None
+    fname_fw = None
+    try:
+        ds_wh_in = xr.open_dataset(sc.woodharvest_path)
+        wh_2100 = ds_wh_in["woodharvest"].isel(time=-1).values  # (country_code,)
+        ccodes = ds_wh_in.coords["country_code"].values
+        ds_wh_in.close()
+
+        # Linear ramp from 1 at 2100 to 0 at the year the AFOLU ramp
+        # reaches zero.  Unlike the AFOLU ramp (which may start < 1 due
+        # to boundary-blend correction), wood harvest demand must be
+        # continuous at 2100.
+        yr_zero = int(RAMP_YEARS[-1]) + 1          # first year with r==0
+        wh_ramp = np.clip((yr_zero - EXT_YEARS) / (yr_zero - cfg.YR_END_INPUT), 0, 1)
+        wh_ext = wh_ramp[:, np.newaxis] * wh_2100[np.newaxis, :]
+
+        ds_wh_out = xr.Dataset(
+            {"woodharvest": xr.DataArray(
+                wh_ext.astype(np.float32),
+                dims=["time", "country_code"],
+                coords={"time": EXT_YEARS, "country_code": ccodes},
+                attrs={"units": "MgC",
+                       "long_name": "wood harvest carbon demand (ramp × IAM 2100)"},
+            )},
+            attrs={**global_attrs,
+                   "title": f"Wood harvest demand ramp ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
+                   "description": ("IAM 2100 wood harvest demand scaled by a "
+                                   "linear ramp from 1 (at 2100) to 0 (at "
+                                   f"{yr_zero}). Intended for use "
+                                   "as: h(t) = max(h_maintenance(t), this_file).")},
+        )
+        WH_STEM = Path(sc.woodharvest_file).stem
+        fname_wh = f"{WH_STEM}_extension_ramp_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+        log(f"  {sc.key}: built wood harvest ramp ({len(EXT_YEARS)} yr × {len(ccodes)} countries)")
+    except Exception as exc:
+        log(f"  {sc.key}: skipping wood harvest extension ({exc})")
+
+    try:
+        ds_fw_in = xr.open_dataset(sc.fuelwood_path)
+        fw_2100 = ds_fw_in["fuelwood"].isel(time=-1).values  # (country_code,)
+        fw_ccodes = ds_fw_in.coords["country_code"].values
+        ds_fw_in.close()
+
+        # Hold fuelwood fraction constant at 2100 value
+        fw_ext = np.broadcast_to(fw_2100[np.newaxis, :], (len(EXT_YEARS), len(fw_ccodes)))
+
+        ds_fw_out = xr.Dataset(
+            {"fuelwood": xr.DataArray(
+                fw_ext.astype(np.float32),
+                dims=["time", "country_code"],
+                coords={"time": EXT_YEARS, "country_code": fw_ccodes},
+                attrs={"units": "fraction",
+                       "long_name": "fuelwood fraction (constant at 2100 value)"},
+            )},
+            attrs={**global_attrs,
+                   "title": f"Fuelwood fraction extension ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
+                   "description": "Fuelwood fraction held constant at 2100 values."},
+        )
+        FW_STEM = Path(sc.fuelwood_file).stem
+        fname_fw = f"{FW_STEM}_extension_static_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+        log(f"  {sc.key}: built fuelwood extension (constant at 2100)")
+    except Exception as exc:
+        log(f"  {sc.key}: skipping fuelwood extension ({exc})")
+
     # Write
     output_plan = [(ds_states_out, fname_states), (ds_biof_out, fname_biof)]
     if mgmt_trans_dvars:
         output_plan.append((ds_mgmt_trans_out, fname_mgmt_trans))
     if mgmt_static_dvars:
         output_plan.append((ds_mgmt_static_out, fname_mgmt_static))
+    if ds_wh_out is not None:
+        output_plan.append((ds_wh_out, fname_wh))
+    if ds_fw_out is not None:
+        output_plan.append((ds_fw_out, fname_fw))
 
     comp = {"zlib": True, "complevel": 4, "dtype": "float32"}
     total_bytes = 0
     written_files = []
     for ds_out, fname in output_plan:
         path = sc.output_dir / fname
-        enc = {v: {**comp, "chunksizes": (1, nlat, nlon)} for v in ds_out.data_vars}
+        enc = {}
+        for v in ds_out.data_vars:
+            if "lat" in ds_out[v].dims:
+                enc[v] = {**comp, "chunksizes": (1, nlat, nlon)}
+            else:
+                enc[v] = {**comp}
         ds_out.to_netcdf(path, encoding=enc)
         sz = os.path.getsize(path)
         total_bytes += sz
