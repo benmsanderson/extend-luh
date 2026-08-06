@@ -146,3 +146,24 @@ def extend_biofuel(crpbiof_2100, beccs_factors, years):
 def extend_constant(field_2100, n_years):
     """Repeat a 2-D field for n_years (for hold-constant variables)."""
     return np.broadcast_to(field_2100[np.newaxis], (n_years,) + field_2100.shape)
+
+
+def extend_harvest(harvest_2100, ext_years):
+    """Hold country-level wood harvest constant at its 2100 level for all extension years.
+
+    Mirrors the CMIP6 LUH2 extension convention (Hurtt et al. 2020), which froze
+    the end-of-period national wood harvest demand for all subsequent years.
+
+    Parameters
+    ----------
+    harvest_2100 : ndarray (n_countries,)
+        Per-country harvest at 2100 (e.g. MgC/yr).
+    ext_years : ndarray (n_ext,)
+        Full extension year range (e.g. 2101–2500).
+
+    Returns
+    -------
+    ndarray (n_ext, n_countries)
+    """
+    n_ext = len(ext_years)
+    return np.broadcast_to(harvest_2100[np.newaxis], (n_ext,) + harvest_2100.shape).copy()

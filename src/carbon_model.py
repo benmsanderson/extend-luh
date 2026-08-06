@@ -30,6 +30,8 @@ CARBON_DENSITY = {
     'urban':    200, 'pltns':  6_000,
     # Aggregated types (used by scenarios without primary/secondary split)
     'forest': 10_000,  # area-weighted blend of primf+secdf+pltns
+    # IAM-specific aliases
+    'timber': 6_000,   # IMAGE name for plantation forests (= pltns)
 }
 
 # Equilibrium carbon stock for regrowing land types (tC per km²)
@@ -46,6 +48,8 @@ C_EQ = {
     'pltns':  8_000,  # managed plantation regrowth
     # Aggregated
     'forest': 10_000,  # net regrowth in aggregate forest pool
+    # IAM-specific aliases
+    'timber': 8_000,   # IMAGE name for plantation forests (= pltns)
 }
 
 

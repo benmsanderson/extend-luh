@@ -16,6 +16,16 @@ def _resolve_scenario(scenario):
     return scenario
 
 
+def _normalize_coords(ds):
+    """Rename latitude/longitude → lat/lon if the short forms are absent."""
+    renames = {}
+    if 'latitude' in ds.dims and 'lat' not in ds.dims:
+        renames['latitude'] = 'lat'
+    if 'longitude' in ds.dims and 'lon' not in ds.dims:
+        renames['longitude'] = 'lon'
+    return ds.rename(renames) if renames else ds
+
+
 # ---------- CSV helpers ----------
 
 def load_csv():
@@ -125,24 +135,38 @@ def load_derived_ramp(years=None, scen=None):
 # ---------- NetCDF helpers ----------
 
 def load_states(scen=None):
-    """Open the states dataset (lazy)."""
+    """Open the states dataset (lazy), normalising lat/lon coord names."""
     sc = _resolve_scenario(scen)
-    return xr.open_dataset(sc.states_path)
+    return _normalize_coords(xr.open_dataset(sc.states_path))
 
 
 def load_management(scen=None):
     """Open the management dataset (lazy).
 
-    For scenarios where management is embedded in the states file,
-    this returns the states dataset.
+    Three cases:
+    - mgmt_in_states=True (H/GCAM): management vars live in the states file.
+    - mgmt_file set (VL/MAgPIE): single combined management NetCDF.
+    - component files only (M/IMAGE): fertl_file + flood_file merged on the fly.
+      Note: close() on the merged result does not release the underlying file
+      handles — they are freed when the Dataset goes out of scope.
     """
     sc = _resolve_scenario(scen)
     if sc.mgmt_in_states:
         return xr.open_dataset(sc.states_path)
-    if sc.mgmt_path is None:
+    if sc.mgmt_path is not None:
+        return xr.open_dataset(sc.mgmt_path)
+    # Multi-file scenario (e.g. M/IMAGE): merge component management files
+    parts = []
+    if sc.fertl_path is not None:
+        parts.append(xr.open_dataset(sc.fertl_path))
+    if sc.flood_path is not None:
+        parts.append(xr.open_dataset(sc.flood_path))
+    if not parts:
         raise FileNotFoundError(
-            f"Scenario '{sc.key}' has no management file.")
-    return xr.open_dataset(sc.mgmt_path)
+            f"Scenario '{sc.key}' has no management file and no component "
+            f"files (fertl_file, flood_file).")
+    merged = xr.merge(parts) if len(parts) > 1 else parts[0]
+    return _normalize_coords(merged)
 
 
 def load_biof(scen=None):

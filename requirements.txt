@@ -4,3 +4,4 @@ pandas>=2.2
 matplotlib>=3.9
 netCDF4>=1.6
 cftime>=1.6
+papermill>=2.4
