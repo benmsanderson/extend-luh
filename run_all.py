@@ -17,6 +17,7 @@ sys.path.insert(0, ".")
 
 from src import config as cfg
 from src.pipeline import calibrate_scenario, extend_scenario, verify_scenario
+from src.diagnostics import plot_diagnostics
 
 
 def main():
@@ -27,6 +28,8 @@ def main():
                         help="Skip calibration (use existing .npz files)")
     parser.add_argument("--skip-extension", action="store_true",
                         help="Skip gridded extension (calibrate only)")
+    parser.add_argument("--skip-plots", action="store_true",
+                        help="Skip diagnostic plot generation")
     parser.add_argument("--skip-verify", action="store_true",
                         help="Skip verification step")
     parser.add_argument("-q", "--quiet", action="store_true",
@@ -58,7 +61,7 @@ def main():
 
         # Step 1: Calibration
         if not args.skip_calibration:
-            print(f"  [1/3] Calibrating...")
+            print(f"  [1/4] Calibrating...")
             try:
                 cal_results[key] = calibrate_scenario(sc, verbose=verbose)
             except Exception as e:
@@ -66,12 +69,12 @@ def main():
                 cal_results[key] = {"key": key, "status": f"error: {e}"}
                 continue
         else:
-            print(f"  [1/3] Skipped (using existing calibration)")
+            print(f"  [1/4] Skipped (using existing calibration)")
             cal_results[key] = {"key": key, "status": "skipped"}
 
         # Step 2: Gridded extension
         if not args.skip_extension:
-            print(f"  [2/3] Extending...")
+            print(f"  [2/4] Extending...")
             try:
                 ext_results[key] = extend_scenario(sc, verbose=verbose)
             except Exception as e:
@@ -79,19 +82,29 @@ def main():
                 ext_results[key] = {"key": key, "status": f"error: {e}"}
                 continue
         else:
-            print(f"  [2/3] Skipped")
+            print(f"  [2/4] Skipped")
             ext_results[key] = {"key": key, "status": "skipped"}
 
-        # Step 3: Verification
+        # Step 3: Diagnostic plots
+        if not args.skip_plots and not args.skip_extension:
+            print(f"  [3/4] Plots...")
+            try:
+                plot_diagnostics(sc, verbose=verbose)
+            except Exception as e:
+                print(f"  ✗ Diagnostic plots failed: {e}")
+        else:
+            print(f"  [3/4] Skipped")
+
+        # Step 4: Verification
         if not args.skip_verify and not args.skip_extension:
-            print(f"  [3/3] Verifying...")
+            print(f"  [4/4] Verifying...")
             try:
                 ver_results[key] = verify_scenario(sc, verbose=verbose)
             except Exception as e:
                 print(f"  ✗ Verification failed: {e}")
                 ver_results[key] = {"key": key, "status": f"error: {e}"}
         else:
-            print(f"  [3/3] Skipped")
+            print(f"  [4/4] Skipped")
             ver_results[key] = {"key": key, "status": "skipped"}
 
         elapsed = time.time() - t0

@@ -35,7 +35,13 @@ class ScenarioConfig:
     biof_file: str               # biofuel fractions
     woodharvest_file: str        # wood harvest (country-level)
     fuelwood_file: str           # fuelwood (country-level)
-    mgmt_file: Optional[str] = None  # management file (separate), if it exists
+    mgmt_file: Optional[str] = None       # combined management file (VL-style)
+    fertl_file: Optional[str] = None      # separate gridded fertilizer file (M-style)
+    flood_file: Optional[str] = None      # separate gridded flood/rice file (M-style)
+    protected_file: Optional[str] = None  # separate protected-areas file (M-style)
+
+    # Variable renames applied when writing output (e.g. IMAGE "timber" → LUH2 "pltns")
+    var_renames: dict = field(default_factory=dict)
 
     # --- State variables that sum to 1 per land cell ---
     state_vars: list = field(default_factory=list)
@@ -52,6 +58,8 @@ class ScenarioConfig:
         f"fertl_{c}" for c in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]])
     mgmt_wood_vars: list = field(default_factory=lambda: [
         "rndwd", "fulwd", "pltns_wdprd", "pltns_bfuel"])
+    # Extra hold-constant vars that don't fit the wood/irrig/fertl categories
+    mgmt_extra_vars: list = field(default_factory=list)
 
     # If True, management vars are embedded in the states file (no separate mgmt file)
     mgmt_in_states: bool = False
@@ -87,12 +95,31 @@ class ScenarioConfig:
         return self.data_dir / self.mgmt_file
 
     @property
+    def fertl_path(self) -> Optional[Path]:
+        if self.fertl_file is None:
+            return None
+        return self.data_dir / self.fertl_file
+
+    @property
+    def flood_path(self) -> Optional[Path]:
+        if self.flood_file is None:
+            return None
+        return self.data_dir / self.flood_file
+
+    @property
+    def protected_path(self) -> Optional[Path]:
+        if self.protected_file is None:
+            return None
+        return self.data_dir / self.protected_file
+
+    @property
     def output_dir(self) -> Path:
         return OUTPUT_DIR / self.key
 
     @property
     def mgmt_hold_constant(self) -> list:
-        return self.mgmt_wood_vars + self.mgmt_irrig_vars + self.mgmt_fertl_vars
+        return (self.mgmt_wood_vars + self.mgmt_irrig_vars
+                + self.mgmt_fertl_vars + self.mgmt_extra_vars)
 
 
 # =====================================================================
@@ -141,6 +168,37 @@ SCENARIOS = {
         mgmt_fertl_vars=[],  # country-level only, not gridded
         mgmt_wood_vars=[],   # country-level only
         mgmt_in_states=True,
+    ),
+    "M": ScenarioConfig(
+        key="M",
+        model="IMAGE 3.4",
+        scenario="SSP2 - Medium Emissions",
+        folder="scen7-M",
+        states_file="output_annual_2024_states_step5.nc",
+        biof_file="biof_IMAGE_LUH3.nc",
+        woodharvest_file="woodharvest_IMAGE_M_LUH3.nc",
+        fuelwood_file="fuelwood_IMAGE_M_LUH3.nc",
+        # No combined mgmt file — variables are split across separate files
+        mgmt_file=None,
+        fertl_file="output_annual_2024_fertilizer_step4.nc",
+        flood_file="output_annual_2024_flood_step3.nc",
+        protected_file="output_annual_2024_protected_step4.nc",
+        # IMAGE states use "timber" for plantation; output renamed to LUH2 "pltns"
+        var_renames={"timber": "pltns"},
+        state_vars=[
+            "primf", "secdf", "primn", "secdn",
+            "c3ann", "c3nfx", "c3per", "c4ann", "c4per",
+            "pastr", "range", "urban", "timber",
+        ],
+        residual_var="secdf",
+        # No wood or irrigation management from IMAGE — hold-constant via restart
+        mgmt_wood_vars=[],
+        mgmt_irrig_vars=[],
+        mgmt_fertl_vars=[
+            f"fertl_{c}" for c in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]],
+        mgmt_extra_vars=["flood"],  # rice flooding fraction from flood_file
+        mgmt_in_states=False,
+        tau_fixed=35,
     ),
 }
 

@@ -326,6 +326,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     for crop in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]:
         _ALL_VAR_META[f"irrig_{crop}"] = {"long_name": f"irrigated fraction of {crop}", "units": f"share of {crop}"}
         _ALL_VAR_META[f"fertl_{crop}"] = {"long_name": f"fertilization rate for {crop}", "units": "kg ha-1 yr-1"}
+    _ALL_VAR_META["flood"] = {"long_name": "flooded fraction of rice cropland", "units": "fraction of rice area"}
 
     def _make_da(varname, data):
         meta = _ALL_VAR_META.get(varname, {})
@@ -356,13 +357,27 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     }
     if sc.mgmt_file is not None:
         global_attrs["source_management_file"] = sc.mgmt_file
+    if sc.fertl_file is not None:
+        global_attrs["source_fertl_file"] = sc.fertl_file
+    if sc.flood_file is not None:
+        global_attrs["source_flood_file"] = sc.flood_file
+    if sc.var_renames:
+        global_attrs["variable_renames"] = str(sc.var_renames)
 
     STATES_STEM = Path(sc.states_file).stem
     BIOF_STEM = Path(sc.biof_file).stem
-    MGMT_STEM = Path(sc.mgmt_file).stem if sc.mgmt_file else f"mgmt_{STATES_STEM}"
+    if sc.mgmt_file:
+        MGMT_STEM = Path(sc.mgmt_file).stem
+    elif sc.fertl_file:
+        MGMT_STEM = Path(sc.fertl_file).stem
+    else:
+        MGMT_STEM = f"mgmt_{STATES_STEM}"
 
     # File 1 — states (transient, active ramp)
-    state_dvars = {v: _make_da(v, ext_states[v]) for v in sc.state_vars}
+    state_dvars = {}
+    for v in sc.state_vars:
+        out_name = sc.var_renames.get(v, v)
+        state_dvars[out_name] = _make_da(out_name, ext_states[v])
     ds_states_out = xr.Dataset(
         state_dvars,
         coords={"time": RAMP_YEARS.astype(np.float64), "lat": lat, "lon": lon},
@@ -428,11 +443,14 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         ccodes = ds_wh_in.coords["country_code"].values
         ds_wh_in.close()
 
-        # Linear ramp from 1 at 2100 to 0 at the year the AFOLU ramp
-        # reaches zero.  Unlike the AFOLU ramp (which may start < 1 due
-        # to boundary-blend correction), wood harvest demand must be
-        # continuous at 2100.
-        yr_zero = int(RAMP_YEARS[-1]) + 1          # first year with r==0
+        # Linear ramp from 1 at 2100 to 0 at YR_AFOLU_ZERO, the year the
+        # AFOLU emissions target reaches zero.  We deliberately pin the
+        # endpoint to YR_AFOLU_ZERO (common across scenarios) rather than
+        # to the forward-solved ramp's numerical zero-crossing
+        # (RAMP_YEARS[-1]), which lands at a scenario-dependent year.
+        # Unlike the AFOLU ramp (which may start < 1 due to boundary-blend
+        # correction), wood harvest demand must be continuous at 2100.
+        yr_zero = cfg.YR_AFOLU_ZERO                # common endpoint (r==0)
         wh_ramp = np.clip((yr_zero - EXT_YEARS) / (yr_zero - cfg.YR_END_INPUT), 0, 1)
         wh_ext = wh_ramp[:, np.newaxis] * wh_2100[np.newaxis, :]
 
@@ -452,7 +470,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
                                    "as: h(t) = max(h_maintenance(t), this_file).")},
         )
         WH_STEM = Path(sc.woodharvest_file).stem
-        fname_wh = f"{WH_STEM}_extension_ramp_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+        fname_wh = f"{WH_STEM}_extension_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
         log(f"  {sc.key}: built wood harvest ramp ({len(EXT_YEARS)} yr × {len(ccodes)} countries)")
     except Exception as exc:
         log(f"  {sc.key}: skipping wood harvest extension ({exc})")
@@ -610,14 +628,16 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     for ti in range(n_ramp):
         af = 0.0
         for v in sc.state_vars:
-            prev = vals_2100[v] if ti == 0 else ds_ext[v].isel(time=ti - 1).values
-            curr = ds_ext[v].isel(time=ti).values
+            ext_v = sc.var_renames.get(v, v)
+            prev = vals_2100[v] if ti == 0 else ds_ext[ext_v].isel(time=ti - 1).values
+            curr = ds_ext[ext_v].isel(time=ti).values
             delta = curr - prev
             af += np.nansum(-delta * cm.CARBON_DENSITY[v] * cell_area_2d) * TC
         ext_transition[ti] = af
         for v in REGROW_VARS:
-            prev = vals_2100[v] if ti == 0 else ds_ext[v].isel(time=ti - 1).values
-            curr = ds_ext[v].isel(time=ti).values
+            ext_v = sc.var_renames.get(v, v)
+            prev = vals_2100[v] if ti == 0 else ds_ext[ext_v].isel(time=ti - 1).values
+            curr = ds_ext[ext_v].isel(time=ti).values
             area_incr_ext[v][ti] = np.nansum((curr - prev) * cell_area_2d)
 
     # ── Stock-change flux ───────────────────────────────────────────
