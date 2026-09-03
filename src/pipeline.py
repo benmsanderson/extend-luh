@@ -287,17 +287,28 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     crpbiof_ext = extend_biofuel(crpbiof_2100, beccs_dict, EXT_YEARS)
 
     # ── Extend management ───────────────────────────────────────────
+    # Management/biofuel variables may live in the management file, the
+    # biofuel file, or (for scenarios with embedded management) the states
+    # file, depending on the IAM.  Fetch each variable's 2100 slice from
+    # whichever input contains it, preferring the management dataset so the
+    # existing per-scenario sources are unchanged.
+    def _get_2100(name):
+        for ds in (ds_mgmt, ds_biof, ds_states):
+            if name in ds:
+                return ds[name].isel(time=-1).values
+        return None
+
     ext_mgmt = {}
     for v in sc.mgmt_hold_constant:
-        if v in ds_mgmt:
-            ext_mgmt[v] = ds_mgmt[v].isel(time=-1).values
+        arr = _get_2100(v)
+        if arr is not None:
+            ext_mgmt[v] = arr
     for v in sc.mgmt_biofuel_vars:
         if v == "crpbiof":
             continue
-        if v in ds_mgmt:
-            ext_mgmt[v] = extend_biofuel(
-                ds_mgmt[v].isel(time=-1).values, beccs_dict, EXT_YEARS
-            )
+        arr = _get_2100(v)
+        if arr is not None:
+            ext_mgmt[v] = extend_biofuel(arr, beccs_dict, EXT_YEARS)
 
     # ── Build & write NetCDF files ──────────────────────────────────
     _ALL_VAR_META = {
@@ -326,6 +337,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     for crop in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]:
         _ALL_VAR_META[f"irrig_{crop}"] = {"long_name": f"irrigated fraction of {crop}", "units": f"share of {crop}"}
         _ALL_VAR_META[f"fertl_{crop}"] = {"long_name": f"fertilization rate for {crop}", "units": "kg ha-1 yr-1"}
+        _ALL_VAR_META[f"cpbf1_{crop}"] = {"long_name": f"first-generation biofuel fraction of {crop}", "units": f"share of {crop}"}
     _ALL_VAR_META["flood"] = {"long_name": "flooded fraction of rice cropland", "units": "fraction of rice area"}
 
     def _make_da(varname, data):

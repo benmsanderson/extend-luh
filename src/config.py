@@ -58,6 +58,9 @@ class ScenarioConfig:
         f"fertl_{c}" for c in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]])
     mgmt_wood_vars: list = field(default_factory=lambda: [
         "rndwd", "fulwd", "pltns_wdprd", "pltns_bfuel"])
+    # First-generation biofuel fractions (held constant at 2100)
+    mgmt_cpbf1_vars: list = field(default_factory=lambda: [
+        f"cpbf1_{c}" for c in ["c3ann", "c4ann", "c3per", "c4per", "c3nfx"]])
     # Extra hold-constant vars that don't fit the wood/irrig/fertl categories
     mgmt_extra_vars: list = field(default_factory=list)
 
@@ -119,7 +122,8 @@ class ScenarioConfig:
     @property
     def mgmt_hold_constant(self) -> list:
         return (self.mgmt_wood_vars + self.mgmt_irrig_vars
-                + self.mgmt_fertl_vars + self.mgmt_extra_vars)
+                + self.mgmt_fertl_vars + self.mgmt_cpbf1_vars
+                + self.mgmt_extra_vars)
 
 
 # =====================================================================
