@@ -509,7 +509,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
                    "description": "Fuelwood fraction held constant at 2100 values."},
         )
         FW_STEM = Path(sc.fuelwood_file).stem
-        fname_fw = f"{FW_STEM}_extension_static_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+        fname_fw = f"{FW_STEM}_extension_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
         log(f"  {sc.key}: built fuelwood extension (constant at 2100)")
     except Exception as exc:
         log(f"  {sc.key}: skipping fuelwood extension ({exc})")
