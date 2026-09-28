@@ -5,7 +5,7 @@ from . import config as cfg
 
 
 def extend_states(values_2100, rates_2100, years, ramp=None,
-                  state_vars=None, residual_var=None):
+                  state_vars=None, residual_var=None, renormalize_overfull=True):
     """Extend land-use state fields from 2100 to *years*.
 
     Strategy:
@@ -83,7 +83,7 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
     # the extension then preserves a physical total.  Cells with sum <= 1 are
     # left untouched (their unaccounted fraction, e.g. inland water, is kept).
     over_unit = land & (cell_total > 1.0)
-    if over_unit.any():
+    if renormalize_overfull and over_unit.any():
         for v in state_vars:
             prev[v] = np.where(over_unit, prev[v] / cell_total, prev[v])
         cell_total = np.where(over_unit, 1.0, cell_total)
