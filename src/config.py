@@ -78,6 +78,10 @@ class ScenarioConfig:
     # scenarios: GLM consumes changes, so rescaling would inject a spurious
     # 2101 land-use change in those cells.
     renormalize_overfull: bool = True
+    # How a full cell handles expansion: "scale" squeezes all managed classes
+    # proportionally; "limit_expansion" caps only the expanding classes to the
+    # room left (non-expanding classes keep their prescribed path).
+    overshoot_mode: str = "scale"
     # Gridded vars extended with the ramped 2100 rate but not part of the
     # per-cell conservation (e.g. crop types, which GLM uses only as deltas
     # to split cropland).
@@ -253,6 +257,7 @@ SCENARIOS = {
         state_vars=["cropland", "pastr", "range", "urban", "othr"],
         residual_var="othr",
         renormalize_overfull=False,
+        overshoot_mode="limit_expansion",
         extra_extend_vars=["c3ann", "c4ann", "c3per", "c4per", "c3nfx"],
         derived_output_vars={"grazing": ["pastr", "range"]},
         state_output_groups={

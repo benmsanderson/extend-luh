@@ -295,6 +295,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         vals, rates, RAMP_YEARS, ramp=derived_ramp,
         state_vars=sc.state_vars, residual_var=sc.residual_var,
         renormalize_overfull=sc.renormalize_overfull,
+        overshoot_mode=sc.overshoot_mode,
     )
 
     # Extra gridded vars: ramped 2100 rate, clamped at zero, not conserved

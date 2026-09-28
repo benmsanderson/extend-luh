@@ -5,7 +5,8 @@ from . import config as cfg
 
 
 def extend_states(values_2100, rates_2100, years, ramp=None,
-                  state_vars=None, residual_var=None, renormalize_overfull=True):
+                  state_vars=None, residual_var=None, renormalize_overfull=True,
+                  overshoot_mode="scale"):
     """Extend land-use state fields from 2100 to *years*.
 
     Strategy:
@@ -124,7 +125,20 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
         # the residual never goes negative.  Without this, the residual absorbs
         # the excess as a negative value, producing individual crop fractions > 1.
         overshoot = land & (non_residual_sum > cell_total) & (non_residual_sum > 0)
-        if overshoot.any():
+        if overshoot.any() and overshoot_mode == "limit_expansion":
+            # Only the expanding classes are limited, to the room left after
+            # this step's declines; non-expanding classes keep their prescribed
+            # path instead of being squeezed to make room.
+            base = {v: np.minimum(new[v], prev[v]) for v in new}
+            incr = {v: np.maximum(new[v] - prev[v], 0.0) for v in new}
+            base_sum = sum(np.nan_to_num(base[v]) for v in new)
+            incr_sum = sum(np.nan_to_num(incr[v]) for v in new)
+            room = np.maximum(cell_total - base_sum, 0.0)
+            frac = np.where(incr_sum > 0, np.minimum(1.0, room / np.where(incr_sum > 0, incr_sum, 1.0)), 1.0)
+            for v in new:
+                new[v] = np.where(overshoot, base[v] + incr[v] * frac, new[v])
+            non_residual_sum = np.where(overshoot, base_sum + incr_sum * frac, non_residual_sum)
+        elif overshoot.any():
             safe_sum = np.where(non_residual_sum > 0, non_residual_sum, 1.0)
             scale = np.where(overshoot, cell_total / safe_sum, 1.0)
             for v in state_vars:
