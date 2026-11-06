@@ -37,6 +37,9 @@ CARBON_DENSITY = {
     # where HL land use changes at 2100 (forest/non-forest mix).
     'cropland':   500,
     'othr':     4_200,
+    # Non-forest natural residual, for scenarios that supply forest separately
+    # (LN/AIM): between primn (1,500) and secdn (1,000).
+    'othr_nf':  1_200,
 }
 
 # Equilibrium carbon stock for regrowing land types (tC per km²)
@@ -59,6 +62,7 @@ C_EQ = {
     # natural-land equilibrium stock at the HL abandonment frontier.
     'cropland':     0,
     'othr':     4_800,
+    'othr_nf':    800,  # as secdn: recovering non-forest
 }
 
 

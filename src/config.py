@@ -279,6 +279,54 @@ SCENARIOS = {
         constrain_alpha_trans=True,
         tau_fixed=35,
     ),
+    "LN": ScenarioConfig(
+        key="LN",
+        model="AIM 3.0",
+        scenario="SSP2 - Low Overshoot_a",
+        # Delivered as GLM inputs (like HL); files kept in the repo's
+        # incoming/ folder rather than under DATA_DIR.
+        folder=str(PROJECT_DIR / "incoming"),
+        states_file="LN_AIM_states.nc",  # nominal stem only
+        # croptypes file holds all land-use states (incl. forest); flood and
+        # protected grids are merged in so their 2100 slices are found as
+        # hold-constant management.
+        states_files=[
+            "croptypes_LN_AIM_v3.nc",
+            "flood_grids_LN_AIM.nc",
+            "protected_LN_AIM.nc",
+        ],
+        # Unlike HL, AIM provides forest explicitly, so natural land is split
+        # into forest and a non-forest residual pool "othr_nf".
+        residual_from=["cropland", "grazing", "urban", "forest"],
+        biof_file="biof_grids_LN_AIM.nc",
+        woodharvest_file="woodharvest_AIM_LN_LUH3.nc",
+        fuelwood_file="fuelwood_AIM_LN_LUH3.nc",
+        state_vars=["cropland", "pastr", "range", "urban", "forest", "othr_nf"],
+        residual_var="othr_nf",
+        renormalize_overfull=False,
+        overshoot_mode="limit_expansion",
+        extra_extend_vars=["c3ann", "c4ann", "c3per", "c4per", "c3nfx"],
+        derived_output_vars={"grazing": ["pastr", "range"]},
+        state_output_groups={
+            "croptypes_LN_AIM_v3": ["c3ann", "c4ann", "c3per", "c4per", "c3nfx",
+                                    "cropland", "grazing", "forest", "urban",
+                                    "pastr", "range"],
+        },
+        mgmt_in_states=True,
+        mgmt_biofuel_vars=["crpbf_c4per"],
+        mgmt_irrig_vars=[],
+        mgmt_fertl_vars=[],
+        mgmt_wood_vars=[],
+        mgmt_cpbf1_vars=[],
+        mgmt_extra_vars=["flood", "primf_prot", "secdf_prot", "primn_secdn_prot"],
+        country_mgmt_files={
+            "AIM_LN_fert_country_v3.nc": "zero",       # annual % change
+            "irrig_AIM_LUH3_croptypes_v3.nc": "hold",  # irrigated area per country
+            "flood_AIM_LUH3_v3.nc": "zero",            # labelled % change (TBC with Louise)
+        },
+        constrain_alpha_trans=True,
+        tau_fixed=35,
+    ),
 }
 
 
