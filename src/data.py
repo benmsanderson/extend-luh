@@ -160,7 +160,11 @@ def load_management(scen=None):
     """
     sc = _resolve_scenario(scen)
     if sc.mgmt_in_states:
-        return load_states(scen=sc) if sc.states_files else xr.open_dataset(sc.states_path)
+        ds = load_states(scen=sc) if sc.states_files else xr.open_dataset(sc.states_path)
+        for fname, vars_ in sc.gridded_mgmt_files.items():
+            extra = _normalize_coords(xr.open_dataset(sc.data_dir / fname))[vars_]
+            ds = xr.merge([ds, extra], compat="override", join="exact")
+        return ds
     if sc.mgmt_path is not None:
         return xr.open_dataset(sc.mgmt_path)
     # Multi-file scenario (e.g. M/IMAGE): merge component management files

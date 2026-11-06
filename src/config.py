@@ -97,6 +97,10 @@ class ScenarioConfig:
     # Country-level management files {filename: "hold" | "zero"}; "zero" is for
     # annual-change variables where a constant level means zero change.
     country_mgmt_files: dict = field(default_factory=dict)
+    # Extra gridded management files {filename: [vars]}; only the listed vars
+    # are read (e.g. LN takes 1st-gen biofuel fractions from an IMAGE file
+    # that also holds IMAGE's own 2nd-gen fractions, which must not be used).
+    gridded_mgmt_files: dict = field(default_factory=dict)
     # Refit without the transition predictor if its coefficient fits negative
     # (unphysical: more conversion would lower emissions).
     constrain_alpha_trans: bool = False
@@ -320,7 +324,12 @@ SCENARIOS = {
         mgmt_irrig_vars=[],
         mgmt_fertl_vars=[],
         mgmt_wood_vars=[],
-        mgmt_cpbf1_vars=[],
+        # 1st-gen biofuel fractions reused from the IMAGE delivery (historical
+        # ratios kept constant in both scenarios; constant 2024-2100).
+        gridded_mgmt_files={
+            "biof_IMAGE_LUH3.nc": [
+                f"cpbf1_{c}" for c in ["c3ann", "c4ann", "c3per", "c4per", "c3nfx"]],
+        },
         mgmt_extra_vars=["flood", "primf_prot", "secdf_prot", "primn_secdn_prot"],
         country_mgmt_files={
             "AIM_LN_fert_country_v3.nc": "zero",       # annual % change
