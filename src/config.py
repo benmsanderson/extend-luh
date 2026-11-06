@@ -11,6 +11,9 @@ OUTPUT_DIR = PROJECT_DIR / "output"
 
 # --- Shared input files ---
 CSV_FILE = DATA_DIR / "extensions_full_emissions_timeseries_2023_2500.csv"
+# LUH2 static data (ice/water fraction), used to keep ocean and ice out of
+# residual natural-land pools in diagnostics.
+LUH_STATIC_FILE = Path("/storage/no-backup-nac/LUH2/staticData_quarterdeg.nc")
 
 # --- Time ---
 YR_END_INPUT = 2100       # Last year of gridded input

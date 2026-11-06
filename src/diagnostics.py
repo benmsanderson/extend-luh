@@ -1,7 +1,5 @@
 """Diagnostic plots saved as PNGs to sc.output_dir after a completed extension run."""
 
-import glob as _glob
-
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -11,7 +9,7 @@ import xarray as xr
 from . import config as cfg
 from . import carbon_model as cm
 from .data import load_states, load_csv, filter_scenario, get_variable, load_derived_ramp
-from .pipeline import _cell_area
+from .pipeline import _cell_area, afolu_reconstruction, load_extension_states
 
 
 # ── Colour palette shared across plots ──────────────────────────────────────
@@ -26,6 +24,7 @@ _PALETTE = {
     'Rangeland':            '#f48fb1',
     'Urban':                '#757575',
     'Plantations':          '#8bc34a',
+    'Other natural':        '#c5b358',
 }
 
 _GROUP_DEFS = [
@@ -34,33 +33,33 @@ _GROUP_DEFS = [
     ('Forest',               ['forest']),
     ('Primary non-forest',   ['primn']),
     ('Secondary non-forest', ['secdn']),
-    ('Cropland',             ['c3ann', 'c3nfx', 'c3per', 'c4ann', 'c4per']),
+    ('Cropland',             ['cropland', 'c3ann', 'c3nfx', 'c3per', 'c4ann', 'c4per']),
     ('Pasture',              ['pastr']),
     ('Rangeland',            ['range']),
     ('Urban',                ['urban']),
     ('Plantations',          ['pltns', 'timber']),
+    ('Other natural',        ['othr', 'othr_nf']),
 ]
 
-
-def _find_ext_states(sc):
-    """Return path to the extension states NetCDF, or None."""
-    candidates = sorted(_glob.glob(
-        str(sc.output_dir / "*_extension_transient_2101-*.nc")))
-    # Prefer a file that has grid dimensions (states, not biofuel-only)
-    for p in candidates:
-        try:
-            with xr.open_dataset(p) as ds:
-                if 'lat' in ds.dims and len(ds.data_vars) > 1:
-                    return p
-        except Exception:
-            continue
-    return candidates[0] if candidates else None
 
 
 def _out_to_src_name(v, sc):
     """Reverse-map an output variable name back to its source name."""
     inv = {out: src for src, out in sc.var_renames.items()}
     return inv.get(v, v)
+
+
+def _icwtr(shape, log):
+    """LUH2 ice/water fraction on the 0.25° grid (zeros if unavailable)."""
+    try:
+        with xr.open_dataset(cfg.LUH_STATIC_FILE, decode_times=False) as ds:
+            ic = np.nan_to_num(ds["icwtr"].values.astype(np.float64))
+        if ic.shape == shape:
+            return ic
+        log(f"  icwtr grid {ic.shape} != {shape}; residual pool not masked")
+    except Exception as exc:
+        log(f"  could not read {cfg.LUH_STATIC_FILE} ({exc}); residual pool not masked")
+    return np.zeros(shape)
 
 
 def plot_diagnostics(sc, *, verbose=True):
@@ -73,21 +72,19 @@ def plot_diagnostics(sc, *, verbose=True):
     """
     log = print if verbose else (lambda *a, **k: None)
 
-    ext_path = _find_ext_states(sc)
     cal_path = sc.output_dir / "afolu_calibration.npz"
-
-    if ext_path is None:
-        log(f"  {sc.key}: no extension states file — skipping plots")
-        return
     if not cal_path.exists():
         log(f"  {sc.key}: no calibration file — skipping plots")
         return
 
-    calib = np.load(cal_path)
-    tau = float(calib["tau"])
-
-    ds_ext = xr.open_dataset(ext_path)
     ds_src = load_states(scen=sc)
+    ds_ext = load_extension_states(sc, ds_src)
+    if ds_ext is None:
+        log(f"  {sc.key}: no extension states file — skipping plots")
+        ds_src.close()
+        return
+
+    tau = float(np.load(cal_path)["tau"])
 
     ext_years = ds_ext.time.values.astype(int)
     src_years = ds_src.time.values.astype(int)
@@ -96,6 +93,17 @@ def plot_diagnostics(sc, *, verbose=True):
     lon = ds_ext.lon.values
     cell_area = _cell_area(lat, lon)  # (nlat, nlon)
 
+    # A synthesised residual pool (GLM-input scenarios: 1 − managed land)
+    # also covers ocean and ice; drop the ice/water fraction for area and
+    # biomass totals.  Fluxes are unaffected (they use changes only).
+    icwtr = _icwtr(cell_area.shape, log) if sc.residual_from else None
+
+    def _frac(ds, v, ti):
+        a = ds[v].isel(time=ti).values
+        if icwtr is not None and v == sc.residual_var:
+            a = np.maximum(np.nan_to_num(a) - icwtr, 0.0)
+        return a
+
     # Output var names (used in ext file); source var names (used in src file)
     # For M: out_vars has 'pltns', src_vars has 'timber'; for VL/H they match.
     out_vars = [sc.var_renames.get(v, v) for v in sc.state_vars]
@@ -103,7 +111,6 @@ def plot_diagnostics(sc, *, verbose=True):
     # ── Plot 1: Global land-use timeseries ───────────────────────────────────
     fig1, ax1 = plt.subplots(figsize=(13, 5))
 
-    # Build groups present in this scenario
     all_out = set(out_vars)
     groups = {
         label: [v for v in vlist if v in all_out]
@@ -113,15 +120,15 @@ def plot_diagnostics(sc, *, verbose=True):
 
     # Pre-2100 global sums from source file (last 50 years to keep it readable)
     src_slice = src_years[-50:] if len(src_years) > 50 else src_years
+    ti_start = len(src_years) - len(src_slice)
     src_data = {}
     for label, out_vlist in groups.items():
         ts = np.zeros(len(src_slice))
         for out_v in out_vlist:
             src_v = _out_to_src_name(out_v, sc)
             if src_v in ds_src:
-                ti_start = len(src_years) - len(src_slice)
                 ts += np.array([
-                    np.nansum(ds_src[src_v].isel(time=ti_start + ti).values * cell_area)
+                    np.nansum(_frac(ds_src, src_v, ti_start + ti) * cell_area)
                     for ti in range(len(src_slice))
                 ])
         src_data[label] = ts
@@ -133,12 +140,11 @@ def plot_diagnostics(sc, *, verbose=True):
         for out_v in out_vlist:
             if out_v in ds_ext:
                 ts += np.array([
-                    np.nansum(ds_ext[out_v].isel(time=ti).values * cell_area)
+                    np.nansum(_frac(ds_ext, out_v, ti) * cell_area)
                     for ti in range(len(ext_years))
                 ])
         ext_data[label] = ts
 
-    # Stacked area
     labels = list(groups.keys())
     colors = [_PALETTE[l] for l in labels]
     all_x = np.concatenate([src_slice, ext_years])
@@ -161,10 +167,7 @@ def plot_diagnostics(sc, *, verbose=True):
     log(f"  {sc.key}: saved {p1.name}")
 
     # ── Plot 2: Biomass trajectory (scndMeanAge model) ───────────────────────
-    regrow_out = [v for v in out_vars if cm.C_EQ.get(v, 0) > 0]
-    regrow_src = [_out_to_src_name(v, sc) for v in regrow_out]
-
-    _ceq = {v: cm.C_EQ.get(v, 0) for v in sc.state_vars}
+    regrow_out = [v for v in out_vars if cm.C_EQ.get(_out_to_src_name(v, sc), 0) > 0]
 
     def _gbm(frac, density):
         return np.nansum(frac * cell_area * density) / 1e9  # GtC
@@ -173,42 +176,33 @@ def plot_diagnostics(sc, *, verbose=True):
     biomass_pre = []
     for ti in range(len(src_years)):
         b = 0.0
-        for sv, ov in zip(sc.state_vars, out_vars):
-            frac = ds_src[sv].isel(time=ti).values if sv in ds_src else None
-            if frac is None:
-                continue
-            b += _gbm(frac, cm.CARBON_DENSITY.get(sv, 0))
+        for sv in sc.state_vars:
+            if sv in ds_src:
+                b += _gbm(_frac(ds_src, sv, ti), cm.CARBON_DENSITY.get(sv, 0))
         biomass_pre.append(b)
     biomass_pre = np.array(biomass_pre)
 
-    # Initialise scndMeanAge at 2100
-    vals_2100 = {}
-    for sv, ov in zip(sc.state_vars, out_vars):
-        if sv in ds_src:
-            vals_2100[ov] = ds_src[sv].isel(time=-1).values
-        elif ov in ds_src:
-            vals_2100[ov] = ds_src[ov].isel(time=-1).values
-
-    sma = {}
-    area_prev = {}
+    # Initialise scndMeanAge at 2100 from the static density.  Regrowing
+    # density is cd · f(age)/f(age₀), f = 1 − exp(−age/τ), so it equals the
+    # static density at 2100 even where cd ≥ C_eq (e.g. secdn, othr_nf).
+    sma, f0, area_prev = {}, {}, {}
     for ov in regrow_out:
-        cd = cm.CARBON_DENSITY.get(ov, 0)
-        ceq = _ceq.get(ov, 0) or _ceq.get(_out_to_src_name(ov, sc), 0)
-        if ceq > 0:
-            sma[ov] = -tau * np.log(1.0 - min(cd / ceq, 0.9999))
-        else:
-            sma[ov] = 0.0
-        frac0 = vals_2100.get(ov, np.zeros((len(lat), len(lon))))
-        area_prev[ov] = np.nansum(frac0 * cell_area)
+        sv = _out_to_src_name(ov, sc)
+        cd = cm.CARBON_DENSITY.get(sv, 0)
+        ceq = cm.C_EQ[sv]
+        f0[ov] = min(cd / ceq, 0.9999)
+        sma[ov] = -tau * np.log(1.0 - f0[ov])
+        area_prev[ov] = np.nansum(_frac(ds_src, sv, -1) * cell_area)
 
     biomass_ext = []
     for ti in range(len(ext_years)):
         b = 0.0
         for ov in out_vars:
-            sv = _out_to_src_name(ov, sc)
-            frac = ds_ext[ov].isel(time=ti).values if ov in ds_ext else None
-            if frac is None:
+            if ov not in ds_ext:
                 continue
+            sv = _out_to_src_name(ov, sc)
+            frac = _frac(ds_ext, ov, ti)
+            cd = cm.CARBON_DENSITY.get(sv, cm.CARBON_DENSITY.get(ov, 0))
             if ov in regrow_out:
                 a_curr = np.nansum(frac * cell_area)
                 a_prev_v = area_prev[ov]
@@ -219,10 +213,9 @@ def plot_diagnostics(sc, *, verbose=True):
                 else:
                     sma[ov] += 1.0
                 area_prev[ov] = a_curr
-                ceq = _ceq.get(ov, _ceq.get(sv, 0))
-                density = ceq * (1.0 - np.exp(-sma[ov] / tau))
+                density = cd * (1.0 - np.exp(-sma[ov] / tau)) / f0[ov]
             else:
-                density = cm.CARBON_DENSITY.get(ov, cm.CARBON_DENSITY.get(sv, 0))
+                density = cd
             b += _gbm(frac, density)
         biomass_ext.append(b)
     biomass_ext = np.array(biomass_ext)
@@ -246,123 +239,52 @@ def plot_diagnostics(sc, *, verbose=True):
     plt.close(fig2)
     log(f"  {sc.key}: saved {p2.name}")
 
+    ds_ext.close()
+    ds_src.close()
+
     # ── Plot 3: AFOLU verification ────────────────────────────────────────────
-    beta = float(calib["beta"])
-    gamma = float(calib["gamma"])
-    alpha_trans = float(calib["alpha_trans"])
-    alpha_stock = float(calib["alpha_stock"])
-
-    TC = cm.TC_TO_MTCO2
-    REGROW_VARS_SRC = [v for v in sc.state_vars if cm.C_EQ.get(v, 0) > 0]
-
-    # IAM target (full timeseries from CSV)
-    df = load_csv()
-    sc_data = filter_scenario(df, scen=sc)
-    afolu_target = get_variable(sc_data, "Emissions|CO2|AFOLU")
+    # Same reconstruction as verify_scenario, so the plot and the metrics agree.
+    rec = afolu_reconstruction(sc)
+    afolu_target = rec["afolu_target"]
     tgt_years = np.array([int(float(c)) for c in afolu_target.index])
     tgt_vals = afolu_target.values
+    flux_years_src = rec["input_flux_years"]
 
-    # Reconstruct transition flux from source states
-    src_input_years = ds_src.time.values.astype(int)
-    n_src = len(src_input_years)
-    trans_src = np.zeros(n_src - 1)
-    area_incr_src = {v: np.zeros(n_src - 1) for v in REGROW_VARS_SRC}
-    for ti in range(1, n_src):
-        af = 0.0
-        for sv in sc.state_vars:
-            if sv not in ds_src:
-                continue
-            delta = (ds_src[sv].isel(time=ti).values
-                     - ds_src[sv].isel(time=ti - 1).values)
-            af += np.nansum(-delta * cm.CARBON_DENSITY.get(sv, 0) * cell_area) * TC
-        trans_src[ti - 1] = af
-        for v in REGROW_VARS_SRC:
-            if v not in ds_src:
-                continue
-            delta = (ds_src[v].isel(time=ti).values
-                     - ds_src[v].isel(time=ti - 1).values)
-            area_incr_src[v][ti - 1] = np.nansum(delta * cell_area)
+    # Show the ramp plus the committed regrowth tail until it is ~negligible.
+    yrs = rec["ext_years"]
+    active = (rec["ramp"] > 1e-8) | (np.abs(rec["ext_calib"]) > 10.0)
+    last = int(yrs[np.where(active)[0][-1]]) if np.any(active) else int(ext_years[-1])
+    m = yrs <= last
 
-    flux_years_src = src_input_years[1:]
-    time_src = (flux_years_src - flux_years_src.mean()) / 10.0
-
-    # Stock-change flux from source period
-    stock_src = np.zeros(n_src - 1)
-    cohort_stock = {v: 0.0 for v in REGROW_VARS_SRC}
-    for ti in range(n_src - 1):
-        for v in REGROW_VARS_SRC:
-            ceq_v = _ceq.get(v, cm.C_EQ.get(v, 0))
-            decay = np.exp(-1.0 / tau) if tau > 0 else 0
-            cohort_stock[v] = cohort_stock[v] * decay + area_incr_src[v][ti] * ceq_v * (1 - decay)
-            stock_src[ti] -= cohort_stock[v] * TC
-
-    recon_src = beta + gamma * time_src + alpha_trans * trans_src + alpha_stock * stock_src
-
-    # Extension period reconstruction
-    EXT_ALL = np.arange(cfg.YR_END_INPUT + 1, cfg.YR_END_OUTPUT + 1)
-    derived_ramp_full = load_derived_ramp(EXT_ALL, scen=sc)
-    trans_ext = np.zeros(len(ext_years))
-    area_incr_ext = {v: np.zeros(len(ext_years)) for v in REGROW_VARS_SRC}
-    vals_2100_src = {sv: ds_src[sv].isel(time=-1).values
-                     for sv in sc.state_vars if sv in ds_src}
-
-    for ti in range(len(ext_years)):
-        af = 0.0
-        for sv, ov in zip(sc.state_vars, out_vars):
-            if ov not in ds_ext:
-                continue
-            prev = (vals_2100_src.get(sv, np.zeros((len(lat), len(lon))))
-                    if ti == 0 else ds_ext[ov].isel(time=ti - 1).values)
-            curr = ds_ext[ov].isel(time=ti).values
-            delta = curr - prev
-            af += np.nansum(-delta * cm.CARBON_DENSITY.get(sv, cm.CARBON_DENSITY.get(ov, 0)) * cell_area) * TC
-        trans_ext[ti] = af
-        for sv in REGROW_VARS_SRC:
-            ov = sc.var_renames.get(sv, sv)
-            if ov not in ds_ext:
-                continue
-            prev = (vals_2100_src.get(sv, np.zeros((len(lat), len(lon))))
-                    if ti == 0 else ds_ext[ov].isel(time=ti - 1).values)
-            curr = ds_ext[ov].isel(time=ti).values
-            area_incr_ext[sv][ti] = np.nansum((curr - prev) * cell_area)
-
-    time_ext_ref = flux_years_src.mean()
-    time_ext = (ext_years - time_ext_ref) / 10.0
-
-    stock_ext = np.zeros(len(ext_years))
-    for v in REGROW_VARS_SRC:
-        cohort_stock[v] = 0.0  # reset for extension
-    for ti in range(len(ext_years)):
-        for v in REGROW_VARS_SRC:
-            ceq_v = _ceq.get(v, cm.C_EQ.get(v, 0))
-            decay = np.exp(-1.0 / tau) if tau > 0 else 0
-            cohort_stock[v] = cohort_stock[v] * decay + area_incr_ext[v][ti] * ceq_v * (1 - decay)
-            stock_ext[ti] -= cohort_stock[v] * TC
-
-    r_ext = derived_ramp_full[:len(ext_years)]
-    recon_ext = beta + gamma * time_ext + alpha_trans * trans_ext * r_ext + alpha_stock * stock_ext
-
-    fig3, ax3 = plt.subplots(figsize=(12, 4))
-    # IAM target
-    mask = (tgt_years >= flux_years_src[0]) & (tgt_years <= int(ext_years[-1]))
+    fig3, (ax3, ax3b) = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
+                                     gridspec_kw={'height_ratios': [2, 1]})
+    mask = (tgt_years >= flux_years_src[0]) & (tgt_years <= last)
     ax3.plot(tgt_years[mask], tgt_vals[mask], 'k-', lw=1.5, label='IAM target')
-    # Reconstructed (source period)
-    ax3.plot(flux_years_src, recon_src, color='steelblue', lw=1.5, ls='--',
+    ax3.plot(flux_years_src, rec["calibrated_pre"], color='steelblue', lw=1.5, ls='--',
              label='Reconstructed (source)')
-    # Reconstructed (extension period)
-    ax3.plot(ext_years, recon_ext, color='steelblue', lw=2, label='Reconstructed (extension)')
+    ax3.plot(yrs[m], rec["ext_calib"][m], color='steelblue', lw=2,
+             label='Reconstructed (extension)')
     ax3.axvline(2100, color='gray', ls='--', lw=0.8)
+    ax3.axvline(int(ext_years[-1]), color='gray', ls=':', lw=0.8)
     ax3.axhline(0, color='gray', lw=0.4)
-    ax3.set_xlabel('Year')
     ax3.set_ylabel('AFOLU CO₂ (Mt CO₂/yr)')
     ax3.set_title(f'{sc.key} — {sc.model}: AFOLU flux — IAM target vs reconstruction')
     ax3.legend()
     ax3.ticklabel_format(useOffset=False)
+
+    # Extension components
+    ax3b.plot(yrs[m], rec["baseline_term"][m], lw=1.5, label='Baseline (β+γ·t₂₁₀₀)·r(t)')
+    ax3b.plot(yrs[m], rec["transition_term"][m], lw=1.5, label='Transition')
+    ax3b.plot(yrs[m], rec["stock_term"][m], lw=1.5, label='Regrowth (stock)')
+    ax3b.axhline(0, color='gray', lw=0.4)
+    ax3b.axvline(2100, color='gray', ls='--', lw=0.8)
+    ax3b.axvline(int(ext_years[-1]), color='gray', ls=':', lw=0.8)
+    ax3b.set_xlabel('Year')
+    ax3b.set_ylabel('Mt CO₂/yr')
+    ax3b.set_title('Extension components', fontsize=10)
+    ax3b.legend(fontsize=8)
     fig3.tight_layout()
     p3 = sc.output_dir / "diag_03_verification.png"
     fig3.savefig(p3, dpi=150, bbox_inches='tight')
     plt.close(fig3)
     log(f"  {sc.key}: saved {p3.name}")
-
-    ds_ext.close()
-    ds_src.close()

@@ -636,34 +636,15 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
 # Step 3 — Verification  (≈ notebook 04)
 # =====================================================================
 
-def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
-    """Recompute AFOLU fluxes from gridded extension and compare to IAM target.
+def load_extension_states(sc: ScenarioConfig, ds_input=None):
+    """Open the extended states (merging per-group files) or return None.
 
-    Returns verification metrics (RMSE, jump at 2100 boundary, etc.).
+    If the residual pool is not written (GLM-input scenarios, where GLM
+    derives natural land itself), it is reconstructed from per-cell
+    conservation: residual = 2100 cell total − other states.
     """
     import glob
 
-    log = print if verbose else (lambda *a, **k: None)
-
-    REGROW_VARS = cm.regrow_vars_for(sc.state_vars)
-    TC = cm.TC_TO_MTCO2
-
-    # ── Load calibration params ─────────────────────────────────────
-    cal = np.load(sc.output_dir / "afolu_calibration.npz")
-    tau_opt = float(cal["tau"])
-    beta = float(cal["beta"])
-    gamma = float(cal["gamma"])
-    alpha_trans = float(cal["alpha_trans"])
-    alpha_stock = float(cal["alpha_stock"])
-    r_derived = cal["ramp"]
-    ext_years_saved = cal["years"]
-
-    # ── IAM target ──────────────────────────────────────────────────
-    df = load_csv()
-    sc_data = filter_scenario(df, scen=sc)
-    afolu_target = get_variable(sc_data, "Emissions|CO2|AFOLU")
-
-    # ── Find extension file ─────────────────────────────────────────
     ext_files = sorted(glob.glob(str(sc.output_dir / "*_extension_transient_2101-*.nc")))
     if sc.state_output_groups:
         stems = set(sc.state_output_groups)
@@ -675,18 +656,52 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
             if "states" in f.lower() or "step4" in f.lower() or "timeseries" in f.lower()
         ][:1]
     if not states_ext_files:
-        return {"key": sc.key, "status": "no_extension_file"}
+        return None
 
     ds_ext = xr.merge([xr.open_dataset(f) for f in states_ext_files])
-    ds_input = load_states(scen=sc)
-
-    # Residual pool not written (GLM derives it): reconstruct it from
-    # per-cell conservation, residual = 2100 cell total − other states.
     if sc.residual_var not in ds_ext:
+        if ds_input is None:
+            ds_input = load_states(scen=sc)
         cell_total = sum(np.nan_to_num(ds_input[v].isel(time=-1).values) for v in sc.state_vars)
         others = sum(ds_ext[sc.var_renames.get(v, v)].fillna(0.0)
                      for v in sc.state_vars if v != sc.residual_var)
         ds_ext[sc.residual_var] = cell_total - others
+    return ds_ext
+
+
+def afolu_reconstruction(sc: ScenarioConfig) -> dict | None:
+    """Recompute AFOLU fluxes from the gridded input and extension.
+
+    Applies the calibrated emulator to land-use changes read back from the
+    NetCDF files: pre-2100 from the input states, 2101-2500 from the
+    extension.  Post-2100 the baseline β + γ·t is frozen at its 2100 value
+    and scaled by the AFOLU ramp r(t); the transition term uses the gridded
+    (already ramped) changes; the stock term carries the regrowth cohorts
+    on from 2100.  Returns None if no extension file exists.
+    """
+    REGROW_VARS = cm.regrow_vars_for(sc.state_vars)
+    TC = cm.TC_TO_MTCO2
+
+    # ── Calibration params ──────────────────────────────────────────
+    cal = np.load(sc.output_dir / "afolu_calibration.npz")
+    tau_opt = float(cal["tau"])
+    beta = float(cal["beta"])
+    gamma = float(cal["gamma"])
+    alpha_trans = float(cal["alpha_trans"])
+    alpha_stock = float(cal["alpha_stock"])
+    r_derived = cal["ramp"]
+
+    # ── IAM target ──────────────────────────────────────────────────
+    df = load_csv()
+    sc_data = filter_scenario(df, scen=sc)
+    afolu_target = get_variable(sc_data, "Emissions|CO2|AFOLU")
+
+    # ── Gridded states ──────────────────────────────────────────────
+    ds_input = load_states(scen=sc)
+    ds_ext = load_extension_states(sc, ds_input)
+    if ds_ext is None:
+        ds_input.close()
+        return None
 
     lat = ds_ext.lat.values
     lon = ds_ext.lon.values
@@ -697,7 +712,6 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     input_years = ds_input.time.values.astype(int)
     input_flux_years = input_years[1:]
     n_pre = len(input_flux_years)
-
     time_trend_pre = (input_flux_years - input_flux_years.mean()) / 10.0
     time_2100 = (2100 - input_flux_years.mean()) / 10.0
 
@@ -776,29 +790,57 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         + alpha_stock * ext_stock
     )
 
-    # ── Metrics ─────────────────────────────────────────────────────
+
     iam_ext_vals = np.array([
         afolu_target.loc[yr] if yr in afolu_target.index else 0.0
         for yr in full_ext_years
     ])
-    residual = ext_calib - iam_ext_vals
+
+    ds_ext.close()
+    ds_input.close()
+
+    return {
+        "input_flux_years": input_flux_years,
+        "calibrated_pre": calibrated_pre,
+        "ext_years": full_ext_years,
+        "ext_calib": ext_calib,
+        "iam_ext": iam_ext_vals,
+        "ramp": ramp_for_ext,
+        "baseline_term": baseline * ramp_for_ext,
+        "transition_term": alpha_trans * ext_transition,
+        "stock_term": alpha_stock * ext_stock,
+        "afolu_target": afolu_target,
+        "tau": tau_opt,
+    }
+
+
+def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
+    """Recompute AFOLU fluxes from gridded extension and compare to IAM target.
+
+    Returns verification metrics (RMSE, jump at 2100 boundary, etc.).
+    """
+    log = print if verbose else (lambda *a, **k: None)
+
+    rec = afolu_reconstruction(sc)
+    if rec is None:
+        return {"key": sc.key, "status": "no_extension_file"}
+
+    afolu_target = rec["afolu_target"]
+    residual = rec["ext_calib"] - rec["iam_ext"]
 
     # Jump at 2100 boundary
-    cal_at_2100 = calibrated_pre[-1]
-    ext_at_2101 = ext_calib[0]
+    cal_at_2100 = rec["calibrated_pre"][-1]
+    ext_at_2101 = rec["ext_calib"][0]
     jump = ext_at_2101 - cal_at_2100
 
     # RMSE over ramp period
-    ramp_mask = ramp_for_ext > 1e-8
+    ramp_mask = rec["ramp"] > 1e-8
     if np.any(ramp_mask):
         rmse_ext = np.sqrt(np.mean(residual[ramp_mask] ** 2))
         max_resid = np.max(np.abs(residual[ramp_mask]))
     else:
         rmse_ext = 0.0
         max_resid = 0.0
-
-    ds_ext.close()
-    ds_input.close()
 
     log(f"  {sc.key}: RMSE={rmse_ext:.1f}, jump={jump:+.1f}, "
         f"max|resid|={max_resid:.1f}")
