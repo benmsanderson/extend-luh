@@ -11,6 +11,9 @@ OUTPUT_DIR = PROJECT_DIR / "output"
 
 # --- Shared input files ---
 CSV_FILE = DATA_DIR / "extensions_full_emissions_timeseries_2023_2500.csv"
+# LUH2 static data (ice/water fraction), used to keep ocean and ice out of
+# residual natural-land pools in diagnostics.
+LUH_STATIC_FILE = Path("/storage/no-backup-nac/LUH2/staticData_quarterdeg.nc")
 
 # --- Time ---
 YR_END_INPUT = 2100       # Last year of gridded input
@@ -58,11 +61,49 @@ class ScenarioConfig:
         f"fertl_{c}" for c in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]])
     mgmt_wood_vars: list = field(default_factory=lambda: [
         "rndwd", "fulwd", "pltns_wdprd", "pltns_bfuel"])
+    # First-generation biofuel fractions (held constant at 2100)
+    mgmt_cpbf1_vars: list = field(default_factory=lambda: [
+        f"cpbf1_{c}" for c in ["c3ann", "c4ann", "c3per", "c4per", "c3nfx"]])
     # Extra hold-constant vars that don't fit the wood/irrig/fertl categories
     mgmt_extra_vars: list = field(default_factory=list)
 
     # If True, management vars are embedded in the states file (no separate mgmt file)
     mgmt_in_states: bool = False
+
+    # --- GLM-input style scenarios (e.g. HL/WITCH) ---
+    # States split across several files; merged on load (states_file is then
+    # only a nominal stem).
+    states_files: list = field(default_factory=list)
+    # If set, residual_var is synthesised as max(0, 1 - sum(residual_from)),
+    # mirroring GLM's own "other land" residual.
+    residual_from: list = field(default_factory=list)
+    # Renormalise input cells whose 2100 state sum exceeds 1.  Off for GLM-input
+    # scenarios: GLM consumes changes, so rescaling would inject a spurious
+    # 2101 land-use change in those cells.
+    renormalize_overfull: bool = True
+    # How a full cell handles expansion: "scale" squeezes all managed classes
+    # proportionally; "limit_expansion" caps only the expanding classes to the
+    # room left (non-expanding classes keep their prescribed path).
+    overshoot_mode: str = "scale"
+    # Gridded vars extended with the ramped 2100 rate but not part of the
+    # per-cell conservation (e.g. crop types, which GLM uses only as deltas
+    # to split cropland).
+    extra_extend_vars: list = field(default_factory=list)
+    # Output-only vars built as sums of extended vars, e.g. grazing = pastr+range.
+    derived_output_vars: dict = field(default_factory=dict)
+    # If set, write one states file per group {input file stem: [vars]} instead
+    # of a single states file, mirroring the input file layout.
+    state_output_groups: dict = field(default_factory=dict)
+    # Country-level management files {filename: "hold" | "zero"}; "zero" is for
+    # annual-change variables where a constant level means zero change.
+    country_mgmt_files: dict = field(default_factory=dict)
+    # Extra gridded management files {filename: [vars]}; only the listed vars
+    # are read (e.g. LN takes 1st-gen biofuel fractions from an IMAGE file
+    # that also holds IMAGE's own 2nd-gen fractions, which must not be used).
+    gridded_mgmt_files: dict = field(default_factory=dict)
+    # Refit without the transition predictor if its coefficient fits negative
+    # (unphysical: more conversion would lower emissions).
+    constrain_alpha_trans: bool = False
 
     # Fixed relaxation timescale (years) for calibration.
     # None → profile-likelihood scan; a number → fix τ at that value.
@@ -119,7 +160,8 @@ class ScenarioConfig:
     @property
     def mgmt_hold_constant(self) -> list:
         return (self.mgmt_wood_vars + self.mgmt_irrig_vars
-                + self.mgmt_fertl_vars + self.mgmt_extra_vars)
+                + self.mgmt_fertl_vars + self.mgmt_cpbf1_vars
+                + self.mgmt_extra_vars)
 
 
 # =====================================================================
@@ -198,6 +240,103 @@ SCENARIOS = {
             f"fertl_{c}" for c in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]],
         mgmt_extra_vars=["flood"],  # rice flooding fraction from flood_file
         mgmt_in_states=False,
+        tau_fixed=35,
+    ),
+    "HL": ScenarioConfig(
+        key="HL",
+        model="WITCH 6.0",
+        scenario="SSP5 - Medium-Low Emissions_a",
+        folder="scen7-HL",
+        # Delivered as GLM inputs: managed land only, split across files.
+        # GLM derives primary/secondary natural land itself, so natural land
+        # is represented here as a single residual pool "othr".
+        states_file="HL_WITCH_Sept28_states.nc",  # nominal stem only
+        states_files=[
+            "cropland_HL_WITCH_pltns_Sept28.nc",
+            "grazing_HL_WITCH_Sept28.nc",
+            "urban_HL_WITCH_Sept28.nc",
+            "croptypes_HL_WITCH_Sept28.nc",
+        ],
+        residual_from=["cropland", "grazing", "urban"],
+        biof_file="biof_2nd_gen_HL_WITCH_Sept28.nc",
+        woodharvest_file="woodharvest_WITCH_HL_LUH3.nc",
+        fuelwood_file="fuelwood_WITCH_HL_LUH3.nc",
+        state_vars=["cropland", "pastr", "range", "urban", "othr"],
+        residual_var="othr",
+        renormalize_overfull=False,
+        overshoot_mode="limit_expansion",
+        extra_extend_vars=["c3ann", "c4ann", "c3per", "c4per", "c3nfx"],
+        derived_output_vars={"grazing": ["pastr", "range"]},
+        state_output_groups={
+            "cropland_HL_WITCH_pltns_Sept28": ["cropland"],
+            "croptypes_HL_WITCH_Sept28": ["c3ann", "c4ann", "c3per", "c4per", "c3nfx"],
+            "grazing_HL_WITCH_Sept28": ["grazing", "pastr", "range"],
+            "urban_HL_WITCH_Sept28": ["urban"],
+        },
+        mgmt_in_states=True,  # no gridded mgmt file; vars looked up across inputs
+        mgmt_biofuel_vars=["crpbf_c3per"],
+        mgmt_irrig_vars=[],
+        mgmt_fertl_vars=[],
+        mgmt_wood_vars=[],
+        mgmt_cpbf1_vars=[],
+        country_mgmt_files={
+            "fertl_WITCH_LUH3_v4.nc": "zero",   # annual % change → 0 holds level
+            "irrig_WITCH_LUH3_v3.nc": "hold",   # irrigated area per country
+        },
+        constrain_alpha_trans=True,
+        tau_fixed=35,
+    ),
+    "LN": ScenarioConfig(
+        key="LN",
+        model="AIM 3.0",
+        scenario="SSP2 - Low Overshoot_a",
+        # Delivered as GLM inputs (like HL); files kept in the repo's
+        # incoming/ folder rather than under DATA_DIR.
+        folder=str(PROJECT_DIR / "incoming"),
+        states_file="LN_AIM_states.nc",  # nominal stem only
+        # croptypes file holds all land-use states (incl. forest); flood and
+        # protected grids are merged in so their 2100 slices are found as
+        # hold-constant management.
+        states_files=[
+            "croptypes_LN_AIM_v3.nc",
+            "flood_grids_LN_AIM.nc",
+            "protected_LN_AIM.nc",
+        ],
+        # Unlike HL, AIM provides forest explicitly, so natural land is split
+        # into forest and a non-forest residual pool "othr_nf".
+        residual_from=["cropland", "grazing", "urban", "forest"],
+        biof_file="biof_grids_LN_AIM.nc",
+        woodharvest_file="woodharvest_AIM_LN_LUH3.nc",
+        fuelwood_file="fuelwood_AIM_LN_LUH3.nc",
+        state_vars=["cropland", "pastr", "range", "urban", "forest", "othr_nf"],
+        residual_var="othr_nf",
+        renormalize_overfull=False,
+        overshoot_mode="limit_expansion",
+        extra_extend_vars=["c3ann", "c4ann", "c3per", "c4per", "c3nfx"],
+        derived_output_vars={"grazing": ["pastr", "range"]},
+        state_output_groups={
+            "croptypes_LN_AIM_v3": ["c3ann", "c4ann", "c3per", "c4per", "c3nfx",
+                                    "cropland", "grazing", "forest", "urban",
+                                    "pastr", "range"],
+        },
+        mgmt_in_states=True,
+        mgmt_biofuel_vars=["crpbf_c4per"],
+        mgmt_irrig_vars=[],
+        mgmt_fertl_vars=[],
+        mgmt_wood_vars=[],
+        # 1st-gen biofuel fractions reused from the IMAGE delivery (historical
+        # ratios kept constant in both scenarios; constant 2024-2100).
+        gridded_mgmt_files={
+            "biof_IMAGE_LUH3.nc": [
+                f"cpbf1_{c}" for c in ["c3ann", "c4ann", "c3per", "c4per", "c3nfx"]],
+        },
+        mgmt_extra_vars=["flood", "primf_prot", "secdf_prot", "primn_secdn_prot"],
+        country_mgmt_files={
+            "AIM_LN_fert_country_v3.nc": "zero",       # annual % change
+            "irrig_AIM_LUH3_croptypes_v3.nc": "hold",  # irrigated area per country
+            "flood_AIM_LUH3_v3.nc": "zero",            # labelled % change (TBC with Louise)
+        },
+        constrain_alpha_trans=True,
         tau_fixed=35,
     ),
 }

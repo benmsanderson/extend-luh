@@ -32,6 +32,14 @@ CARBON_DENSITY = {
     'forest': 10_000,  # area-weighted blend of primf+secdf+pltns
     # IAM-specific aliases
     'timber': 6_000,   # IMAGE name for plantation forests (= pltns)
+    # GLM-input scenarios (HL/WITCH): aggregate cropland, and all natural land
+    # as one residual pool.  4,200 = LUH 2024 natural-land density weighted by
+    # where HL land use changes at 2100 (forest/non-forest mix).
+    'cropland':   500,
+    'othr':     4_200,
+    # Non-forest natural residual, for scenarios that supply forest separately
+    # (LN/AIM): between primn (1,500) and secdn (1,000).
+    'othr_nf':  1_200,
 }
 
 # Equilibrium carbon stock for regrowing land types (tC per km²)
@@ -50,6 +58,11 @@ C_EQ = {
     'forest': 10_000,  # net regrowth in aggregate forest pool
     # IAM-specific aliases
     'timber': 8_000,   # IMAGE name for plantation forests (= pltns)
+    # GLM-input scenarios (HL/WITCH); othr regrows toward the LUH 2024
+    # natural-land equilibrium stock at the HL abandonment frontier.
+    'cropland':     0,
+    'othr':     4_800,
+    'othr_nf':    800,  # as secdn: recovering non-forest
 }
 
 
@@ -222,7 +235,7 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
                        area_incr_pre, F_trans_unit, dA_unit,
                        afolu_target_ext, years_pre, years_ext,
                        regrow_vars=None, calibration_residual_2100=0.0,
-                       blend_timescale=10.0):
+                       blend_timescale=10.0, r_zero_year=None):
     """
     Forward solve for AFOLU-consistent ramp r(t) from 2101 onward.
 
@@ -253,6 +266,11 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
     blend_timescale : float, optional
         E-folding timescale (years) for blending the calibration residual
         into the post-2100 target. Default 10.
+    r_zero_year : int, optional
+        From this year on, force r(t) = 0: land-use change stops once the
+        AFOLU target reaches zero, and committed stock-change fluxes from
+        earlier cohorts play out without being offset by further land-use
+        change.  Default None (no cap).
 
     Returns
     -------
@@ -316,6 +334,8 @@ def forward_solve_ramp(beta, gamma, alpha_trans, alpha_stock, tau,
         # Solve for r(t)
         r_t = (target_t - alpha_stock * S_prev) / denom
         r_t = np.clip(r_t, 0.0, 1.0)
+        if r_zero_year is not None and yr0 + t >= r_zero_year:
+            r_t = 0.0
         r_derived[t] = r_t
 
         # Update G_v

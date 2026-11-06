@@ -137,7 +137,15 @@ def load_derived_ramp(years=None, scen=None):
 def load_states(scen=None):
     """Open the states dataset (lazy), normalising lat/lon coord names."""
     sc = _resolve_scenario(scen)
-    return _normalize_coords(xr.open_dataset(sc.states_path))
+    if not sc.states_files:
+        return _normalize_coords(xr.open_dataset(sc.states_path))
+    # GLM-input scenario: states split across files — merge them.
+    parts = [_normalize_coords(xr.open_dataset(sc.data_dir / f)) for f in sc.states_files]
+    ds = xr.merge(parts, compat="override", join="exact")
+    if sc.residual_from:
+        managed = sum(ds[v].fillna(0.0) for v in sc.residual_from)
+        ds[sc.residual_var] = (1.0 - managed).clip(min=0.0)
+    return ds
 
 
 def load_management(scen=None):
@@ -152,7 +160,11 @@ def load_management(scen=None):
     """
     sc = _resolve_scenario(scen)
     if sc.mgmt_in_states:
-        return xr.open_dataset(sc.states_path)
+        ds = load_states(scen=sc) if sc.states_files else xr.open_dataset(sc.states_path)
+        for fname, vars_ in sc.gridded_mgmt_files.items():
+            extra = _normalize_coords(xr.open_dataset(sc.data_dir / fname))[vars_]
+            ds = xr.merge([ds, extra], compat="override", join="exact")
+        return ds
     if sc.mgmt_path is not None:
         return xr.open_dataset(sc.mgmt_path)
     # Multi-file scenario (e.g. M/IMAGE): merge component management files

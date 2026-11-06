@@ -5,7 +5,8 @@ from . import config as cfg
 
 
 def extend_states(values_2100, rates_2100, years, ramp=None,
-                  state_vars=None, residual_var=None):
+                  state_vars=None, residual_var=None, renormalize_overfull=True,
+                  overshoot_mode="scale"):
     """Extend land-use state fields from 2100 to *years*.
 
     Strategy:
@@ -53,8 +54,23 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
     # in global sums.  Convert to float32 only when writing final NetCDF.
     out = {v: np.empty((nt,) + shape2d, dtype=np.float64) for v in state_vars}
 
-    # Previous timestep values — start from 2100
-    prev = {v: values_2100[v].copy().astype(np.float64) for v in state_vars}
+    # Land mask: a cell is land if *any* state variable is finite there.
+    # We must not key this off a single variable (e.g. the residual): some
+    # IAMs (IMAGE) store NaN — meaning "zero" — for sparse classes such as
+    # secondary forest over genuine land cells, so keying off secdf alone
+    # would drop most of the land and leave those cells un-conserved.
+    land = np.zeros(shape2d, dtype=bool)
+    for v in state_vars:
+        land |= np.isfinite(values_2100[v])
+
+    # On land, treat a NaN state (or rate) as 0 — "class absent here" — so the
+    # residual can absorb and per-cell conservation holds.  Off land, keep NaN.
+    def _fill(arr):
+        a = np.where(np.isfinite(arr), arr, 0.0).astype(np.float64)
+        return np.where(land, a, np.nan)
+
+    # Previous timestep values — start from 2100 (NaN→0 on land)
+    prev = {v: _fill(values_2100[v]) for v in state_vars}
 
     # Per-cell total to preserve: sum of all state vars at 2100.
     # On ocean cells (all NaN) this is 0, but residual guard below keeps them NaN.
@@ -62,14 +78,22 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
     for v in state_vars:
         cell_total += np.where(np.isfinite(values_2100[v]), values_2100[v], 0.0)
 
-    # Land mask: cells where residual_var (and hence all states) is finite
-    land = np.isfinite(values_2100[residual_var])
+    # Safeguard: a few input cells have a 2100 state sum > 1 (e.g. IMAGE cells
+    # where primary land and cropland overlap to >100% of the cell).  Fractions
+    # cannot exceed the cell, so renormalise those cells to sum to 1 at 2100;
+    # the extension then preserves a physical total.  Cells with sum <= 1 are
+    # left untouched (their unaccounted fraction, e.g. inland water, is kept).
+    over_unit = land & (cell_total > 1.0)
+    if renormalize_overfull and over_unit.any():
+        for v in state_vars:
+            prev[v] = np.where(over_unit, prev[v] / cell_total, prev[v])
+        cell_total = np.where(over_unit, 1.0, cell_total)
 
     # Normalise rates so they sum to zero per cell.  Input datasets may have
     # small per-cell imbalances (especially with aggregated variables like
     # "forest"); without this correction, the residual variable would absorb
     # the full imbalance, causing a rate discontinuity at the 2100 boundary.
-    rates = {v: rates_2100[v].astype(np.float64) for v in state_vars}
+    rates = {v: _fill(rates_2100[v]) for v in state_vars}
     rate_sum = np.zeros(shape2d, dtype=np.float64)
     for v in state_vars:
         rate_sum += np.where(np.isfinite(rates[v]), rates[v], 0.0)
@@ -101,7 +125,20 @@ def extend_states(values_2100, rates_2100, years, ramp=None,
         # the residual never goes negative.  Without this, the residual absorbs
         # the excess as a negative value, producing individual crop fractions > 1.
         overshoot = land & (non_residual_sum > cell_total) & (non_residual_sum > 0)
-        if overshoot.any():
+        if overshoot.any() and overshoot_mode == "limit_expansion":
+            # Only the expanding classes are limited, to the room left after
+            # this step's declines; non-expanding classes keep their prescribed
+            # path instead of being squeezed to make room.
+            base = {v: np.minimum(new[v], prev[v]) for v in new}
+            incr = {v: np.maximum(new[v] - prev[v], 0.0) for v in new}
+            base_sum = sum(np.nan_to_num(base[v]) for v in new)
+            incr_sum = sum(np.nan_to_num(incr[v]) for v in new)
+            room = np.maximum(cell_total - base_sum, 0.0)
+            frac = np.where(incr_sum > 0, np.minimum(1.0, room / np.where(incr_sum > 0, incr_sum, 1.0)), 1.0)
+            for v in new:
+                new[v] = np.where(overshoot, base[v] + incr[v] * frac, new[v])
+            non_residual_sum = np.where(overshoot, base_sum + incr_sum * frac, non_residual_sum)
+        elif overshoot.any():
             safe_sum = np.where(non_residual_sum > 0, non_residual_sum, 1.0)
             scale = np.where(overshoot, cell_total / safe_sum, 1.0)
             for v in state_vars:

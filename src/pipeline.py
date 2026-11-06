@@ -124,6 +124,21 @@ def calibrate_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     fitted = result["fitted"]
     model_type = "4-predictor"
 
+    # Physical consistency: drop the transition predictor if α_trans < 0
+    if sc.constrain_alpha_trans and alpha_trans < 0:
+        log(f"  {sc.key}: α_trans < 0 ({alpha_trans:.3f}), refitting without transition term")
+        n_cal = len(afolu_cal)
+        time_trend_cal = (input_flux_years - input_flux_years.mean()) / 10.0
+        X3 = np.column_stack([np.ones(n_cal), time_trend_cal, result["stock_flux"]])
+        coefs3, _, _, _ = np.linalg.lstsq(X3, afolu_cal, rcond=None)
+        beta, gamma, alpha_stock = coefs3
+        alpha_trans = 0.0
+        fitted = X3 @ coefs3
+        ss_res = np.sum((afolu_cal - fitted) ** 2)
+        ss_tot = np.sum((afolu_cal - afolu_cal.mean()) ** 2)
+        r2 = 1 - ss_res / ss_tot
+        model_type = "3-predictor (no transition)"
+
     # Physical consistency: fall back to 3-predictor if α_stock < 0
     if alpha_stock < 0:
         log(f"  {sc.key}: α_stock < 0 ({alpha_stock:.3f}), refitting 3-predictor")
@@ -181,6 +196,7 @@ def calibrate_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         years_ext=years_ext,
         regrow_vars=REGROW_VARS,
         calibration_residual_2100=cal_residual_2100,
+        r_zero_year=cfg.YR_AFOLU_ZERO,
     )
 
     ramp = ramp_result["ramp"]
@@ -271,33 +287,60 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
 
     vals = state_2100(ds_states, scen=sc)
     rates = rates_2100(ds_states, scen=sc)
-    crpbiof_2100 = ds_biof["crpbiof"].isel(time=-1).values
+    has_crpbiof = "crpbiof" in ds_biof
+    crpbiof_2100 = ds_biof["crpbiof"].isel(time=-1).values if has_crpbiof else None
 
     # ── Extend states ───────────────────────────────────────────────
     ext_states = extend_states(
         vals, rates, RAMP_YEARS, ramp=derived_ramp,
         state_vars=sc.state_vars, residual_var=sc.residual_var,
+        renormalize_overfull=sc.renormalize_overfull,
+        overshoot_mode=sc.overshoot_mode,
     )
+
+    # Extra gridded vars: ramped 2100 rate, clamped at zero, not conserved
+    # (e.g. crop types, which GLM uses only as deltas to split cropland).
+    for v in sc.extra_extend_vars:
+        prev = np.nan_to_num(ds_states[v].isel(time=-1).values.astype(np.float64))
+        rate = np.nan_to_num(prev - ds_states[v].isel(time=-2).values.astype(np.float64))
+        series = np.empty((len(RAMP_YEARS),) + prev.shape)
+        for ti in range(len(RAMP_YEARS)):
+            prev = np.maximum(prev + rate * derived_ramp[ti], 0.0)
+            series[ti] = prev
+        ext_states[v] = series
+    for v, parts in sc.derived_output_vars.items():
+        ext_states[v] = sum(ext_states[p] for p in parts)
 
     # ── Extend biofuel ──────────────────────────────────────────────
     df = load_csv()
     sc_data = filter_scenario(df, scen=sc)
     beccs = beccs_scaling_factors(sc_data)
     beccs_dict = beccs.to_dict()
-    crpbiof_ext = extend_biofuel(crpbiof_2100, beccs_dict, EXT_YEARS)
+    crpbiof_ext = extend_biofuel(crpbiof_2100, beccs_dict, EXT_YEARS) if has_crpbiof else None
 
     # ── Extend management ───────────────────────────────────────────
+    # Management/biofuel variables may live in the management file, the
+    # biofuel file, or (for scenarios with embedded management) the states
+    # file, depending on the IAM.  Fetch each variable's 2100 slice from
+    # whichever input contains it, preferring the management dataset so the
+    # existing per-scenario sources are unchanged.
+    def _get_2100(name):
+        for ds in (ds_mgmt, ds_biof, ds_states):
+            if name in ds:
+                return ds[name].isel(time=-1).values
+        return None
+
     ext_mgmt = {}
     for v in sc.mgmt_hold_constant:
-        if v in ds_mgmt:
-            ext_mgmt[v] = ds_mgmt[v].isel(time=-1).values
+        arr = _get_2100(v)
+        if arr is not None:
+            ext_mgmt[v] = arr
     for v in sc.mgmt_biofuel_vars:
         if v == "crpbiof":
             continue
-        if v in ds_mgmt:
-            ext_mgmt[v] = extend_biofuel(
-                ds_mgmt[v].isel(time=-1).values, beccs_dict, EXT_YEARS
-            )
+        arr = _get_2100(v)
+        if arr is not None:
+            ext_mgmt[v] = extend_biofuel(arr, beccs_dict, EXT_YEARS)
 
     # ── Build & write NetCDF files ──────────────────────────────────
     _ALL_VAR_META = {
@@ -315,6 +358,8 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         "range": {"long_name": "rangeland", "units": "share of carea"},
         "urban": {"long_name": "urban land", "units": "share of carea"},
         "pltns": {"long_name": "plantation forests", "units": "share of carea"},
+        "cropland": {"long_name": "cropland", "units": "fraction of gridcell area"},
+        "grazing": {"long_name": "grazing land (pasture + rangeland)", "units": "fraction of gridcell area"},
         "crpbiof": {"long_name": "biofuel fraction of cropland", "units": "fraction of cropland area"},
         "crpbf_c3per": {"long_name": "C3 perennial crops grown as second-generation biofuels", "units": "share of c3per"},
         "crpbf_c4per": {"long_name": "C4 perennial crops grown as second-generation biofuels", "units": "share of c4per"},
@@ -326,6 +371,7 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     for crop in ["c3ann", "c3nfx", "c3per", "c4ann", "c4per"]:
         _ALL_VAR_META[f"irrig_{crop}"] = {"long_name": f"irrigated fraction of {crop}", "units": f"share of {crop}"}
         _ALL_VAR_META[f"fertl_{crop}"] = {"long_name": f"fertilization rate for {crop}", "units": "kg ha-1 yr-1"}
+        _ALL_VAR_META[f"cpbf1_{crop}"] = {"long_name": f"first-generation biofuel fraction of {crop}", "units": f"share of {crop}"}
     _ALL_VAR_META["flood"] = {"long_name": "flooded fraction of rice cropland", "units": "fraction of rice area"}
 
     def _make_da(varname, data):
@@ -363,6 +409,11 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         global_attrs["source_flood_file"] = sc.flood_file
     if sc.var_renames:
         global_attrs["variable_renames"] = str(sc.var_renames)
+    if sc.states_files:
+        global_attrs["source_states_file"] = ", ".join(sc.states_files)
+        global_attrs["natural_land_residual"] = (
+            f"{sc.residual_var} = max(0, 1 - ({' + '.join(sc.residual_from)})); "
+            "not written (GLM derives natural land itself)")
 
     STATES_STEM = Path(sc.states_file).stem
     BIOF_STEM = Path(sc.biof_file).stem
@@ -373,33 +424,35 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     else:
         MGMT_STEM = f"mgmt_{STATES_STEM}"
 
-    # File 1 — states (transient, active ramp)
-    state_dvars = {}
-    for v in sc.state_vars:
-        out_name = sc.var_renames.get(v, v)
-        state_dvars[out_name] = _make_da(out_name, ext_states[v])
-    ds_states_out = xr.Dataset(
-        state_dvars,
-        coords={"time": RAMP_YEARS.astype(np.float64), "lat": lat, "lon": lon},
-    )
-    ds_states_out.attrs = {
-        **global_attrs,
-        "title": f"LUH state extension ({RAMP_YEARS[0]}-{RAMP_YEARS[-1]})",
-    }
-    fname_states = f"{STATES_STEM}_extension_transient_{RAMP_YEARS[0]}-{RAMP_YEARS[-1]}.nc"
+    # File 1 — states (transient, active ramp).  Either one file with all
+    # state vars, or (GLM-input scenarios) one file per input-file group.
+    state_coords = {"time": RAMP_YEARS.astype(np.float64), "lat": lat, "lon": lon}
+    ramp_tag = f"{RAMP_YEARS[0]}-{RAMP_YEARS[-1]}"
+    groups = sc.state_output_groups or {STATES_STEM: sc.state_vars}
+    states_outputs = []
+    for stem, gvars in groups.items():
+        dvars = {}
+        for v in gvars:
+            out_name = sc.var_renames.get(v, v)
+            dvars[out_name] = _make_da(out_name, ext_states[v])
+        ds_g = xr.Dataset(dvars, coords=state_coords)
+        ds_g.attrs = {**global_attrs, "title": f"LUH state extension ({ramp_tag})"}
+        states_outputs.append((ds_g, f"{stem}_extension_transient_{ramp_tag}.nc"))
     del ext_states
     gc.collect()
 
     # File 2 — biofuel (transient, full 2101-2500)
-    ds_biof_out = xr.Dataset(
-        {"crpbiof": _make_da("crpbiof", crpbiof_ext)},
-        coords={"time": EXT_YEARS.astype(np.float64), "lat": lat, "lon": lon},
-    )
-    ds_biof_out.attrs = {
-        **global_attrs,
-        "title": f"LUH biofuel extension ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
-    }
+    ds_biof_out = None
     fname_biof = f"{BIOF_STEM}_extension_transient_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+    if has_crpbiof:
+        ds_biof_out = xr.Dataset(
+            {"crpbiof": _make_da("crpbiof", crpbiof_ext)},
+            coords={"time": EXT_YEARS.astype(np.float64), "lat": lat, "lon": lon},
+        )
+        ds_biof_out.attrs = {
+            **global_attrs,
+            "title": f"LUH biofuel extension ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
+        }
 
     # File 3 — management transient (BECCS-scaled vars)
     mgmt_trans_dvars = {}
@@ -415,6 +468,10 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         "title": f"LUH management extension – transient ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
     }
     fname_mgmt_trans = f"{MGMT_STEM}_extension_transient_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+    if not has_crpbiof:
+        # No crpbiof file (e.g. HL): the 2nd-gen biofuel fractions are the
+        # biofuel input, so return them under the biofuel file's name.
+        fname_mgmt_trans = fname_biof
 
     # File 4 — management static (hold-constant)
     mgmt_static_dvars = {}
@@ -497,13 +554,42 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
                    "description": "Fuelwood fraction held constant at 2100 values."},
         )
         FW_STEM = Path(sc.fuelwood_file).stem
-        fname_fw = f"{FW_STEM}_extension_static_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
+        fname_fw = f"{FW_STEM}_extension_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"
         log(f"  {sc.key}: built fuelwood extension (constant at 2100)")
     except Exception as exc:
         log(f"  {sc.key}: skipping fuelwood extension ({exc})")
 
+    # File 7 — country-level management files (GLM-input scenarios).
+    # "hold": constant at the 2100 value; "zero": the variable is an annual
+    # change, so a constant level means zero change after 2100.
+    country_outputs = []
+    for fname_in, mode in sc.country_mgmt_files.items():
+        ds_in = xr.open_dataset(sc.data_dir / fname_in)
+        dvars = {}
+        for v in ds_in.data_vars:
+            da = ds_in[v]
+            if "time" not in da.dims:
+                continue
+            last = da.isel(time=-1)
+            base = xr.zeros_like(last) if mode == "zero" else last
+            ext = base.expand_dims(time=EXT_YEARS).transpose(*da.dims)
+            ext.attrs = dict(da.attrs)
+            dvars[v] = ext.astype(np.float32)
+        ds_c = xr.Dataset(dvars)
+        ds_c.attrs = {**global_attrs,
+                      "title": f"Country-level management extension ({EXT_YEARS[0]}-{EXT_YEARS[-1]})",
+                      "description": ("Held constant at 2100 values." if mode == "hold" else
+                                      "Annual-change variable set to zero after 2100 "
+                                      "(i.e. level held constant at 2100).")}
+        country_outputs.append((ds_c, f"{Path(fname_in).stem}_extension_{EXT_YEARS[0]}-{EXT_YEARS[-1]}.nc"))
+        ds_in.close()
+        log(f"  {sc.key}: built {fname_in} extension ({mode})")
+
     # Write
-    output_plan = [(ds_states_out, fname_states), (ds_biof_out, fname_biof)]
+    output_plan = list(states_outputs)
+    if ds_biof_out is not None:
+        output_plan.append((ds_biof_out, fname_biof))
+    output_plan.extend(country_outputs)
     if mgmt_trans_dvars:
         output_plan.append((ds_mgmt_trans_out, fname_mgmt_trans))
     if mgmt_static_dvars:
@@ -550,19 +636,53 @@ def extend_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
 # Step 3 — Verification  (≈ notebook 04)
 # =====================================================================
 
-def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
-    """Recompute AFOLU fluxes from gridded extension and compare to IAM target.
+def load_extension_states(sc: ScenarioConfig, ds_input=None):
+    """Open the extended states (merging per-group files) or return None.
 
-    Returns verification metrics (RMSE, jump at 2100 boundary, etc.).
+    If the residual pool is not written (GLM-input scenarios, where GLM
+    derives natural land itself), it is reconstructed from per-cell
+    conservation: residual = 2100 cell total − other states.
     """
     import glob
 
-    log = print if verbose else (lambda *a, **k: None)
+    ext_files = sorted(glob.glob(str(sc.output_dir / "*_extension_transient_2101-*.nc")))
+    if sc.state_output_groups:
+        stems = set(sc.state_output_groups)
+        states_ext_files = [f for f in ext_files
+                            if Path(f).name.split("_extension_transient_")[0] in stems]
+    else:
+        states_ext_files = [
+            f for f in ext_files
+            if "states" in f.lower() or "step4" in f.lower() or "timeseries" in f.lower()
+        ][:1]
+    if not states_ext_files:
+        return None
 
+    ds_ext = xr.merge([xr.open_dataset(f) for f in states_ext_files])
+    if sc.residual_var not in ds_ext:
+        if ds_input is None:
+            ds_input = load_states(scen=sc)
+        cell_total = sum(np.nan_to_num(ds_input[v].isel(time=-1).values) for v in sc.state_vars)
+        others = sum(ds_ext[sc.var_renames.get(v, v)].fillna(0.0)
+                     for v in sc.state_vars if v != sc.residual_var)
+        ds_ext[sc.residual_var] = cell_total - others
+    return ds_ext
+
+
+def afolu_reconstruction(sc: ScenarioConfig) -> dict | None:
+    """Recompute AFOLU fluxes from the gridded input and extension.
+
+    Applies the calibrated emulator to land-use changes read back from the
+    NetCDF files: pre-2100 from the input states, 2101-2500 from the
+    extension.  Post-2100 the baseline β + γ·t is frozen at its 2100 value
+    and scaled by the AFOLU ramp r(t); the transition term uses the gridded
+    (already ramped) changes; the stock term carries the regrowth cohorts
+    on from 2100.  Returns None if no extension file exists.
+    """
     REGROW_VARS = cm.regrow_vars_for(sc.state_vars)
     TC = cm.TC_TO_MTCO2
 
-    # ── Load calibration params ─────────────────────────────────────
+    # ── Calibration params ──────────────────────────────────────────
     cal = np.load(sc.output_dir / "afolu_calibration.npz")
     tau_opt = float(cal["tau"])
     beta = float(cal["beta"])
@@ -570,25 +690,18 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     alpha_trans = float(cal["alpha_trans"])
     alpha_stock = float(cal["alpha_stock"])
     r_derived = cal["ramp"]
-    ext_years_saved = cal["years"]
 
     # ── IAM target ──────────────────────────────────────────────────
     df = load_csv()
     sc_data = filter_scenario(df, scen=sc)
     afolu_target = get_variable(sc_data, "Emissions|CO2|AFOLU")
 
-    # ── Find extension file ─────────────────────────────────────────
-    ext_files = sorted(glob.glob(str(sc.output_dir / "*_extension_transient_2101-*.nc")))
-    states_ext_file = [
-        f for f in ext_files
-        if "states" in f.lower() or "step4" in f.lower() or "timeseries" in f.lower()
-    ]
-    if not states_ext_file:
-        return {"key": sc.key, "status": "no_extension_file"}
-    states_ext_file = states_ext_file[0]
-
-    ds_ext = xr.open_dataset(states_ext_file)
+    # ── Gridded states ──────────────────────────────────────────────
     ds_input = load_states(scen=sc)
+    ds_ext = load_extension_states(sc, ds_input)
+    if ds_ext is None:
+        ds_input.close()
+        return None
 
     lat = ds_ext.lat.values
     lon = ds_ext.lon.values
@@ -599,7 +712,6 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
     input_years = ds_input.time.values.astype(int)
     input_flux_years = input_years[1:]
     n_pre = len(input_flux_years)
-
     time_trend_pre = (input_flux_years - input_flux_years.mean()) / 10.0
     time_2100 = (2100 - input_flux_years.mean()) / 10.0
 
@@ -678,29 +790,57 @@ def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
         + alpha_stock * ext_stock
     )
 
-    # ── Metrics ─────────────────────────────────────────────────────
+
     iam_ext_vals = np.array([
         afolu_target.loc[yr] if yr in afolu_target.index else 0.0
         for yr in full_ext_years
     ])
-    residual = ext_calib - iam_ext_vals
+
+    ds_ext.close()
+    ds_input.close()
+
+    return {
+        "input_flux_years": input_flux_years,
+        "calibrated_pre": calibrated_pre,
+        "ext_years": full_ext_years,
+        "ext_calib": ext_calib,
+        "iam_ext": iam_ext_vals,
+        "ramp": ramp_for_ext,
+        "baseline_term": baseline * ramp_for_ext,
+        "transition_term": alpha_trans * ext_transition,
+        "stock_term": alpha_stock * ext_stock,
+        "afolu_target": afolu_target,
+        "tau": tau_opt,
+    }
+
+
+def verify_scenario(sc: ScenarioConfig, *, verbose: bool = True) -> dict:
+    """Recompute AFOLU fluxes from gridded extension and compare to IAM target.
+
+    Returns verification metrics (RMSE, jump at 2100 boundary, etc.).
+    """
+    log = print if verbose else (lambda *a, **k: None)
+
+    rec = afolu_reconstruction(sc)
+    if rec is None:
+        return {"key": sc.key, "status": "no_extension_file"}
+
+    afolu_target = rec["afolu_target"]
+    residual = rec["ext_calib"] - rec["iam_ext"]
 
     # Jump at 2100 boundary
-    cal_at_2100 = calibrated_pre[-1]
-    ext_at_2101 = ext_calib[0]
+    cal_at_2100 = rec["calibrated_pre"][-1]
+    ext_at_2101 = rec["ext_calib"][0]
     jump = ext_at_2101 - cal_at_2100
 
     # RMSE over ramp period
-    ramp_mask = ramp_for_ext > 1e-8
+    ramp_mask = rec["ramp"] > 1e-8
     if np.any(ramp_mask):
         rmse_ext = np.sqrt(np.mean(residual[ramp_mask] ** 2))
         max_resid = np.max(np.abs(residual[ramp_mask]))
     else:
         rmse_ext = 0.0
         max_resid = 0.0
-
-    ds_ext.close()
-    ds_input.close()
 
     log(f"  {sc.key}: RMSE={rmse_ext:.1f}, jump={jump:+.1f}, "
         f"max|resid|={max_resid:.1f}")
